@@ -1,13 +1,24 @@
 //
+// Copyright (C) 2018 The Android Open Source Project
 // Copyright (C) 2026 Xynes / Redroid C2 Project
-// Android 12+ Hardware-Accelerated Codec2 HAL for Redroid
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 //
 
 cc_library_shared {
     name: "libcodec2_redroid_vaapi",
     vendor: true,
 
-    // Build both 32-bit and 64-bit versions for complete multilib support
     compile_multilib: "both",
     multilib: {
         lib64: {
@@ -68,8 +79,6 @@ cc_binary {
     vendor: true,
     relative_install_path: "hw",
 
-    // Compile 64-bit primary when 64-bit architecture is present.
-    // On 32-bit-only targets, automatically compiles as 32-bit.
     compile_multilib: "first",
 
     srcs: [
