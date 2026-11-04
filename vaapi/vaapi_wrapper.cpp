@@ -23,6 +23,7 @@
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
 #include <drm_fourcc.h>
+#include <drm/drm_fourcc.h>
 
 #define LOG_TAG "C2RedroidVaapi"
 
@@ -198,8 +199,10 @@ VASurfaceID VaapiWrapper::ImportDrmPrimeSurface(const DrmPrimeBuffer &buf) {
     prime_desc.layers[0].drm_format = buf.fourcc;
     prime_desc.layers[0].num_planes = 2;
     prime_desc.layers[0].pitches[0] = buf.stride;
+    prime_desc.layers[0].pitch[0] = buf.stride;
     prime_desc.layers[0].offset[0] = 0;
     prime_desc.layers[0].pitches[1] = buf.stride;
+    prime_desc.layers[0].pitch[1] = buf.stride;
     prime_desc.layers[0].offset[1] = buf.stride * buf.height;
     prime_desc.layers[0].object_index[0] = 0;
     prime_desc.layers[0].object_index[1] = 0;
@@ -268,6 +271,7 @@ bool VaapiWrapper::RenderPictureParameters(VASurfaceID surface, bool is_keyframe
         VAEncPictureParameterBufferH264 pic_param{};
         pic_param.reference_picture = surface;
         pic_param.reconstructed_picture = surface;
+        pic_param.CurrPic.picture_id = surface;
         pic_param.coded_buf = mCodedBuf;
         pic_param.picture_width = mConfig.width;
         pic_param.picture_height = mConfig.height;
@@ -288,6 +292,9 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
         VAEncSliceParameterBufferH264 slice_param{};
         slice_param.start_row_number = 0;
         slice_param.slice_height = (mConfig.height + 15) / 16;
+        slice_param.macroblock_address = 0;
+        slice_param.num_macroblocks = ((mConfig.width + 15) / 16) * ((mConfig.height + 15) / 16);
+        slice_param.macroblock_info = VA_INVALID_ID;
         slice_param.slice_type = is_keyframe ? 2 : 0;  // 2 = I-slice, 0 = P-slice in vaapi
 
         VABufferID slice_buf_id = VA_INVALID_ID;
