@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,8 +53,7 @@ bool VaapiWrapper::InitDrmDevice() {
     mDrmFd = open(node, O_RDWR);
     if (mDrmFd < 0) {
         ALOGE("Failed to open DRM render node %s: %s", node, strerror(errno));
-        // Fallback to card0 if renderD128 is not directly accessible
-        mDrmFd = open("/dev/dri/card0", O_RDWR);
+        mDrmFd = open("/dev/dri/card0", O_RDWR);  // fallback if render node wasn't passed into the container
         if (mDrmFd < 0) {
             ALOGE("Failed fallback to /dev/dri/card0: %s", strerror(errno));
             return false;
@@ -126,7 +126,6 @@ bool VaapiWrapper::CreateEncoderContext() {
         return false;
     }
 
-    // Allocate output bitstream coded buffer (typically 1.5x of YUV frame size is plenty)
     uint32_t coded_buf_size = mConfig.width * mConfig.height * 3 / 2;
     status = vaCreateBuffer(mVaDisplay, mVaConfigId, VAEncCodedBufferType,
                             coded_buf_size, 1, nullptr, &mCodedBuf);
@@ -172,7 +171,7 @@ bool VaapiWrapper::SetupRateControl() {
 
     rc_param->bits_per_second = mConfig.bit_rate;
     rc_param->target_percentage = 95;
-    rc_param->window_size = 500; // 500ms sliding buffer for low latency
+    rc_param->window_size = 500;  // 500ms sliding window keeps bit spikes in check without lag
     rc_param->initial_qp = mConfig.initial_qp;
     rc_param->min_qp = mConfig.min_qp;
     rc_param->basic_unit_size = 0;
@@ -197,7 +196,7 @@ VASurfaceID VaapiWrapper::ImportDrmPrimeSurface(const DrmPrimeBuffer &buf) {
     prime_desc.num_layers = 1;
 
     prime_desc.layers[0].drm_format = buf.fourcc;
-    prime_desc.layers[0].num_planes = 2; // For NV12 / NV21
+    prime_desc.layers[0].num_planes = 2;
     prime_desc.layers[0].pitches[0] = buf.stride;
     prime_desc.layers[0].offset[0] = 0;
     prime_desc.layers[0].pitches[1] = buf.stride;
@@ -244,10 +243,10 @@ bool VaapiWrapper::RenderSequenceParameters() {
     if (mConfig.codec == CodecType::H264) {
         VAEncSequenceParameterBufferH264 seq_param{};
         seq_param.seq_parameter_set_id = 0;
-        seq_param.level_idc = 41; // Level 4.1 for 1080p60
+        seq_param.level_idc = 41;  // level 4.1 needed for 1080p60
         seq_param.intra_period = mConfig.intra_period;
         seq_param.intra_idr_period = mConfig.intra_period;
-        seq_param.ip_period = mConfig.ip_period; // 1 = IPPP (0 B-frames)
+        seq_param.ip_period = mConfig.ip_period;
         seq_param.bits_per_second = mConfig.bit_rate;
         seq_param.max_num_ref_frames = 1;
         seq_param.picture_width_in_mbs = (mConfig.width + 15) / 16;
@@ -289,7 +288,7 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
         VAEncSliceParameterBufferH264 slice_param{};
         slice_param.start_row_number = 0;
         slice_param.slice_height = (mConfig.height + 15) / 16;
-        slice_param.slice_type = is_keyframe ? 2 /* I_SLICE */ : 0 /* P_SLICE */;
+        slice_param.slice_type = is_keyframe ? 2 : 0;  // 2 = I-slice, 0 = P-slice in vaapi
 
         VABufferID slice_buf_id = VA_INVALID_ID;
         vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSliceParameterBufferType,
@@ -314,7 +313,6 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
     bool is_keyframe = (mFrameIndex % mConfig.intra_period == 0) || force_keyframe || mForceKeyFrame;
     mForceKeyFrame = false;
 
-    // Begin picture pipeline on GPU
     VAStatus status = vaBeginPicture(mVaDisplay, mVaContextId, input_surface);
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaBeginPicture failed: %s", vaErrorStr(status));
@@ -333,14 +331,12 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
         return false;
     }
 
-    // Direct synchronization on the encoded coded buffer
     status = vaSyncSurface(mVaDisplay, input_surface);
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaSyncSurface failed: %s", vaErrorStr(status));
         return false;
     }
 
-    // Direct zero-copy extraction: Map hardware coded buffer and write straight to destination linear block
     VACodedBufferSegment *buf_segment = nullptr;
     status = vaMapBuffer(mVaDisplay, mCodedBuf, (void **)&buf_segment);
     if (status != VA_STATUS_SUCCESS || !buf_segment) {

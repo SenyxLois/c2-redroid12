@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,21 +36,9 @@ public:
     bool Initialize();
     void Deinitialize();
 
-    /**
-     * Imports a DRM PRIME DMA-BUF into VA-API as a VASurfaceID with ZERO CPU MEMCPY.
-     * Memory stays entirely on the GPU.
-     */
     VASurfaceID ImportDrmPrimeSurface(const DrmPrimeBuffer &buf);
-
-    /**
-     * Frees a transient or cached VASurfaceID.
-     */
     void DestroySurface(VASurfaceID surface_id);
 
-    /**
-     * Encodes a hardware surface directly to the output bitstream buffer.
-     * Writes NAL packets directly into out_linear_buf with zero intermediate copy.
-     */
     bool EncodeFrame(VASurfaceID input_surface,
                      bool force_keyframe,
                      void *out_linear_buf,
