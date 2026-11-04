@@ -63,10 +63,12 @@ c2_status_t C2RedroidComponentStore::createComponent(
     if (name == "c2.redroid.avc.encoder") {
         auto intf = std::make_shared<C2RedroidAvcEnc::IntfImpl>(mReflector);
         *component = std::make_shared<C2RedroidAvcEnc>(intf);
+        *component = C2RedroidAvcEnc::Create(mReflector);
         return C2_OK;
     } else if (name == "c2.redroid.hevc.encoder") {
         auto intf = std::make_shared<C2RedroidHevcEnc::IntfImpl>(mReflector);
         *component = std::make_shared<C2RedroidHevcEnc>(intf);
+        *component = C2RedroidHevcEnc::Create(mReflector);
         return C2_OK;
     }
 
@@ -81,10 +83,12 @@ c2_status_t C2RedroidComponentStore::createInterface(
     if (name == "c2.redroid.avc.encoder") {
         *interface = std::make_shared<SimpleInterface<C2RedroidAvcEnc::IntfImpl>>(
             name.c_str(), 0, std::make_shared<C2RedroidAvcEnc::IntfImpl>(mReflector));
+        *interface = C2RedroidAvcEnc::CreateInterface(mReflector);
         return C2_OK;
     } else if (name == "c2.redroid.hevc.encoder") {
         *interface = std::make_shared<SimpleInterface<C2RedroidHevcEnc::IntfImpl>>(
             name.c_str(), 0, std::make_shared<C2RedroidHevcEnc::IntfImpl>(mReflector));
+        *interface = C2RedroidHevcEnc::CreateInterface(mReflector);
         return C2_OK;
     }
 
@@ -132,6 +136,7 @@ c2_status_t C2RedroidComponentStore::querySupportedParams_nb(
 }
 
 c2_status_t C2RedroidComponentStore::querySupportedValues_nb(
+c2_status_t C2RedroidComponentStore::querySupportedValues_sm(
         std::vector<C2FieldSupportedValuesQuery> &fields) const {
     (void)fields;
     return C2_OK;
