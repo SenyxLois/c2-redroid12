@@ -1,0 +1,101 @@
+//
+// Copyright (C) 2026 Xynes / Redroid C2 Project
+// Android 12+ Hardware-Accelerated Codec2 HAL for Redroid
+//
+
+cc_library_shared {
+    name: "libcodec2_redroid_vaapi",
+    vendor: true,
+
+    // Build both 32-bit and 64-bit versions for complete multilib support
+    compile_multilib: "both",
+    multilib: {
+        lib64: {
+            cflags: [
+                "-DARCH_64BIT",
+                "-O3",
+                "-fomit-frame-pointer",
+                "-mavx2",
+            ],
+        },
+        lib32: {
+            cflags: [
+                "-DARCH_32BIT",
+                "-O3",
+            ],
+        },
+    },
+
+    srcs: [
+        "vaapi/vaapi_wrapper.cpp",
+        "core/C2RedroidEnc.cpp",
+        "core/C2RedroidAvcEnc.cpp",
+        "core/C2RedroidHevcEnc.cpp",
+        "core/C2RedroidComponentStore.cpp",
+    ],
+
+    export_include_dirs: [
+        ".",
+        "vaapi",
+        "core",
+    ],
+
+    shared_libs: [
+        "libva",
+        "libva-drm",
+        "libdrm",
+        "libcodec2",
+        "libcodec2_vndk",
+        "libcodec2_simple_component",
+        "libstagefright_foundation",
+        "libbase",
+        "libutils",
+        "libcutils",
+        "liblog",
+        "libui",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "-DLOG_TAG=\"C2Redroid\"",
+    ],
+}
+
+cc_binary {
+    name: "android.hardware.media.c2@1.2-service.redroid",
+    vendor: true,
+    relative_install_path: "hw",
+
+    // Compile 64-bit primary when 64-bit architecture is present.
+    // On 32-bit-only targets, automatically compiles as 32-bit.
+    compile_multilib: "first",
+
+    srcs: [
+        "service/service.cpp",
+    ],
+
+    shared_libs: [
+        "libcodec2_redroid_vaapi",
+        "android.hardware.media.c2@1.0",
+        "android.hardware.media.c2@1.1",
+        "android.hardware.media.c2@1.2",
+        "libcodec2_hidl@1.2",
+        "libbinder",
+        "libhidlbase",
+        "libutils",
+        "libcutils",
+        "liblog",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-O3",
+        "-DLOG_TAG=\"C2RedroidService\"",
+    ],
+
+    init_rc: ["android.hardware.media.c2@1.2-service.redroid.rc"],
+    vintf_fragments: ["manifest_media_c2.xml"],
+}

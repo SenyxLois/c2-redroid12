@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+    Copyright (C) 2026 Xynes / Redroid C2 Project
+    Hardware-accelerated Codec2 encoders for Redroid (VA-API / Iris Xe / AMD)
+-->
+<MediaCodecs>
+    <Encoders>
+        <!-- H.264 / AVC Hardware Encoder -->
+        <MediaCodec name="c2.redroid.avc.encoder" type="video/avc">
+            <Limit name="size" min="64x64" max="4096x2160" />
+            <Limit name="alignment" value="16x16" />
+            <Limit name="block-size" value="16x16" />
+            <Limit name="blocks-per-second" min="1" max="1966080" />
+            <Limit name="bitrate" range="64000-100000000" />
+            <Limit name="frame-rate" range="1-120" />
+            <Limit name="concurrent-instances" max="16" />
+            <Limit name="performance-points" value="3840x2160@60,1920x1080@120" />
+            <Feature name="bitrate-modes" value="CBR,VBR" />
+            <Feature name="can-swap-width-height" value="true" />
+            <Attribute name="software-codec" value="0" />
+            <Attribute name="hw-accelerated" value="1" />
+        </MediaCodec>
+
+        <!-- H.265 / HEVC Hardware Encoder -->
+        <MediaCodec name="c2.redroid.hevc.encoder" type="video/hevc">
+            <Limit name="size" min="64x64" max="4096x2160" />
+            <Limit name="alignment" value="16x16" />
+            <Limit name="block-size" value="16x16" />
+            <Limit name="blocks-per-second" min="1" max="1966080" />
+            <Limit name="bitrate" range="64000-100000000" />
+            <Limit name="frame-rate" range="1-120" />
+            <Limit name="concurrent-instances" max="16" />
+            <Limit name="performance-points" value="3840x2160@60,1920x1080@120" />
+            <Feature name="bitrate-modes" value="CBR,VBR" />
+            <Feature name="can-swap-width-height" value="true" />
+            <Attribute name="software-codec" value="0" />
+            <Attribute name="hw-accelerated" value="1" />
+        </MediaCodec>
+    </Encoders>
+</MediaCodecs>

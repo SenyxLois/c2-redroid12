@@ -1,0 +1,7 @@
+service vendor.c2-redroid12 /vendor/bin/hw/android.hardware.media.c2@1.2-service.redroid
+    class hal
+    user mediacodec
+    group camera drmrpc mediadrm gpu
+    ioprio rt 4
+    capabilities SYS_NICE
+    writepid /dev/cpuset/foreground/tasks
