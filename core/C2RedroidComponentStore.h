@@ -66,6 +66,7 @@ public:
             std::vector<std::shared_ptr<C2ParamDescriptor>> *const params) const override;
 
     c2_status_t querySupportedValues_nb(
+    c2_status_t querySupportedValues_sm(
             std::vector<C2FieldSupportedValuesQuery> &fields) const override;
 
 private:
