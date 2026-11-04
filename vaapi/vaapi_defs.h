@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,9 +35,9 @@ enum class CodecType {
 };
 
 enum class RateControlMode {
-    CBR,    // Constant Bitrate (ideal for low-latency streaming)
-    VBR,    // Variable Bitrate
-    CQP     // Constant Quantization Parameter
+    CBR,
+    VBR,
+    CQP
 };
 
 struct VaapiEncoderConfig {
@@ -44,15 +45,15 @@ struct VaapiEncoderConfig {
     uint32_t width = 1280;
     uint32_t height = 720;
     uint32_t frame_rate = 60;
-    uint32_t bit_rate = 10000000;       // 10 Mbps default
-    uint32_t max_bit_rate = 15000000;   // 15 Mbps peak
-    uint32_t intra_period = 60;         // IDR frame every 1s at 60fps (or periodic)
-    uint32_t ip_period = 1;             // 1 means NO B-frames (IPPP stream for 0 latency)
+    uint32_t bit_rate = 10000000;
+    uint32_t max_bit_rate = 15000000;
+    uint32_t intra_period = 60;
+    uint32_t ip_period = 1;  // pure IPPP, no b-frames keeps latency flat for streaming
     RateControlMode rc_mode = RateControlMode::CBR;
     uint32_t initial_qp = 26;
     uint32_t min_qp = 10;
     uint32_t max_qp = 51;
-    bool enable_intra_refresh = true;   // Low latency dirty-slice refresh
+    bool enable_intra_refresh = true;
     const char *drm_node = "/dev/dri/renderD128";
 };
 
