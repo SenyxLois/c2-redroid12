@@ -18,6 +18,7 @@
 #pragma once
 
 #include "C2RedroidEnc.h"
+#include <util/C2InterfaceHelper.h>
 
 namespace android {
 namespace hardware {
@@ -30,7 +31,11 @@ public:
     class IntfImpl;
 
     C2RedroidAvcEnc(const std::shared_ptr<IntfImpl> &intfImpl);
+    C2RedroidAvcEnc(const std::shared_ptr<C2ComponentInterface> &intf);
     virtual ~C2RedroidAvcEnc() = default;
+
+    static std::shared_ptr<C2Component> Create(const std::shared_ptr<C2ReflectorHelper> &reflector);
+    static std::shared_ptr<C2ComponentInterface> CreateInterface(const std::shared_ptr<C2ReflectorHelper> &reflector);
 
 protected:
     CodecType getCodecType() const override { return CodecType::H264; }
