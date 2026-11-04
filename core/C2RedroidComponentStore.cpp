@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,18 +34,16 @@ C2RedroidComponentStore::C2RedroidComponentStore()
 }
 
 void C2RedroidComponentStore::initTraits() {
-    // 1. AVC / H.264 Hardware Encoder
     {
         auto traits = std::make_shared<C2Component::Traits>();
         traits->name = "c2.redroid.avc.encoder";
         traits->domain = C2Component::DOMAIN_VIDEO;
         traits->kind = C2Component::KIND_ENCODER;
-        traits->rank = 256; // Higher rank than Google software encoder (512)
+        traits->rank = 256;  // beat c2.android.sw (512) for codec matching
         traits->mediaType = "video/avc";
         mTraitsList.push_back(traits);
     }
 
-    // 2. HEVC / H.265 Hardware Encoder
     {
         auto traits = std::make_shared<C2Component::Traits>();
         traits->name = "c2.redroid.hevc.encoder";
@@ -144,7 +143,6 @@ c2_status_t C2RedroidComponentStore::querySupportedValues_nb(
 } // namespace hardware
 } // namespace android
 
-// Factory export for dynamic loader
 extern "C" ::C2ComponentStore* CreateCodec2Store() {
     return new ::android::hardware::media::c2::redroid::C2RedroidComponentStore();
 }
