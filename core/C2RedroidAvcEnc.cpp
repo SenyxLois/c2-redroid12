@@ -17,6 +17,8 @@
 
 #include "C2RedroidAvcEnc.h"
 #include <C2InterfaceHelper.h>
+#include <SimpleC2Interface.h>
+#include <util/C2InterfaceHelper.h>
 
 namespace android {
 namespace hardware {
@@ -29,6 +31,7 @@ public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
         : C2InterfaceHelper(helper) {
         setHelper(helper);
+        setDerivedInstance(this);
 
         addParameter(
             DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
@@ -59,13 +62,20 @@ public:
     }
 
     static C2R SizeSetter(bool mayBlock, C2P<C2StreamPictureSizeInfo::input> &me) {
+    static C2R SizeSetter(bool mayBlock, const C2P<C2StreamPictureSizeInfo::input> &oldMe,
+                          C2P<C2StreamPictureSizeInfo::input> &me) {
         (void)mayBlock;
         return me.F(me.v.width).validate() ? C2R::Ok() : C2R::BadValue();
+        (void)oldMe;
+        (void)me;
+        return C2R::Ok();
     }
 
     static C2R BitrateSetter(bool mayBlock, C2P<C2StreamBitrateInfo::output> &me) {
         (void)mayBlock;
         return me.F(me.v.value).validate() ? C2R::Ok() : C2R::BadValue();
+        (void)me;
+        return C2R::Ok();
     }
 
 private:
@@ -77,6 +87,19 @@ private:
 
 C2RedroidAvcEnc::C2RedroidAvcEnc(const std::shared_ptr<IntfImpl> &intfImpl)
     : C2RedroidEnc(intfImpl) {
+C2RedroidAvcEnc::C2RedroidAvcEnc(const std::shared_ptr<C2ComponentInterface> &intf)
+    : C2RedroidEnc(intf) {
+}
+
+std::shared_ptr<C2Component> C2RedroidAvcEnc::Create(const std::shared_ptr<C2ReflectorHelper> &reflector) {
+    auto intfImpl = std::make_shared<IntfImpl>(reflector);
+    auto intf = std::make_shared<SimpleC2Interface<IntfImpl>>("c2.redroid.avc.encoder", 0, intfImpl);
+    return std::make_shared<C2RedroidAvcEnc>(intf);
+}
+
+std::shared_ptr<C2ComponentInterface> C2RedroidAvcEnc::CreateInterface(const std::shared_ptr<C2ReflectorHelper> &reflector) {
+    auto intfImpl = std::make_shared<IntfImpl>(reflector);
+    return std::make_shared<SimpleC2Interface<IntfImpl>>("c2.redroid.avc.encoder", 0, intfImpl);
 }
 
 } // namespace redroid
