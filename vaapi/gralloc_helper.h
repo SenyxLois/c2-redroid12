@@ -21,6 +21,7 @@
 #include <cutils/native_handle.h>
 #include <log/log.h>
 #include <drm_fourcc.h>
+#include <drm/drm_fourcc.h>
 
 #define LOG_TAG "C2RedroidGralloc"
 
