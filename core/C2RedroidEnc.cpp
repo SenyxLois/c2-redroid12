@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,11 +74,11 @@ bool C2RedroidEnc::initEncoder() {
     config.bit_rate = mBitrate;
     config.max_bit_rate = mBitrate * 3 / 2;
     config.intra_period = mIntraPeriod;
-    config.ip_period = 1; // Strict low-latency (0 B-frames)
+    config.ip_period = 1;  // no b-frames, keeps latency flat
     config.rc_mode = RateControlMode::CBR;
     config.drm_node = "/dev/dri/renderD128";
 
-    // Read optional overrides from system properties
+    // allow overriding the render node per container/board
     char prop_val[PROPERTY_VALUE_MAX];
     if (property_get("ro.boot.redroid_gpu_node", prop_val, nullptr) > 0) {
         config.drm_node = prop_val;
@@ -131,7 +132,6 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     uint32_t width = graphicBlock.width();
     uint32_t height = graphicBlock.height();
 
-    // Check dynamic resolution change
     if (mWidth != width || mHeight != height || !mVaapi) {
         mWidth = width;
         mHeight = height;
@@ -142,7 +142,6 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         }
     }
 
-    // Zero-Copy buffer import from native handle
     const native_handle_t *handle = graphicBlock.handle();
     if (!handle) {
         ALOGE("Failed to obtain native_handle_t from C2GraphicBlock");
@@ -164,7 +163,6 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    // Allocate output linear block from block pool
     size_t max_out_size = width * height * 3 / 2;
     std::shared_ptr<C2LinearBlock> outBlock;
     c2_status_t status = pool->fetchLinearBlock(
@@ -187,7 +185,6 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    // Direct hardware encode from imported surface straight into output linear block
     size_t actual_out_size = 0;
     bool is_keyframe = false;
     bool force_keyframe = (work->input.flags & C2FrameData::FLAG_SYNC_FRAME);
@@ -196,7 +193,7 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
                                   writeView.data(), max_out_size,
                                   &actual_out_size, &is_keyframe);
 
-    // Free transient imported surface handle (underlying buffer kept by graphicBlock)
+    // drop the transient va surface; the underlying dma-buf stays alive in graphicBlock
     mVaapi->DestroySurface(input_surface);
 
     if (!ok || actual_out_size == 0) {
@@ -205,7 +202,6 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    // Populate output worklet
     std::shared_ptr<C2Buffer> outBuffer = C2Buffer::CreateLinearBuffer(
         outBlock->share(0, actual_out_size, C2Fence()));
 

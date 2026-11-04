@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,7 +44,6 @@ public:
     C2RedroidEnc(const std::shared_ptr<IntfImpl> &intfImpl);
     virtual ~C2RedroidEnc();
 
-    // From SimpleC2Component
     c2_status_t onInit() override;
     c2_status_t onStop() override;
     void onReset() override;
