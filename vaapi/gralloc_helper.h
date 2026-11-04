@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,12 +32,7 @@ namespace redroid {
 
 class GrallocHelper {
 public:
-    /**
-     * Extracts DRM PRIME buffer metadata from an Android native buffer handle.
-     * In Redroid / minigbm / cros_gralloc:
-     * - handle->data[0] is the PRIME file descriptor (dma-buf)
-     * - Width, height, stride are provided by C2GraphicBlock or metadata
-     */
+    // minigbm / cros_gralloc packs the prime dma-buf fd into data[0]
     static bool ExtractDrmBuffer(const native_handle_t *handle,
                                 uint32_t width,
                                 uint32_t height,
@@ -53,45 +49,43 @@ public:
         out_buf->height = height;
         out_buf->stride = stride > 0 ? stride : width;
 
-        // Map Android HAL pixel format to DRM FourCC
         switch (format) {
-            case 0x11: // HAL_PIXEL_FORMAT_YCrCb_420_SP (NV21)
+            case 0x11:  // HAL_PIXEL_FORMAT_YCrCb_420_SP
                 out_buf->fourcc = DRM_FORMAT_NV21;
                 out_buf->total_size = out_buf->stride * height * 3 / 2;
                 break;
-            case 0x32315659: // HAL_PIXEL_FORMAT_YV12
+            case 0x32315659:  // HAL_PIXEL_FORMAT_YV12
                 out_buf->fourcc = DRM_FORMAT_YVU420;
                 out_buf->total_size = out_buf->stride * height * 3 / 2;
                 break;
-            case 0x1:  // HAL_PIXEL_FORMAT_RGBA_8888
+            case 0x1:
                 out_buf->fourcc = DRM_FORMAT_ABGR8888;
                 out_buf->total_size = out_buf->stride * height * 4;
                 break;
-            case 0x2:  // HAL_PIXEL_FORMAT_RGBX_8888
+            case 0x2:
                 out_buf->fourcc = DRM_FORMAT_XBGR8888;
                 out_buf->total_size = out_buf->stride * height * 4;
                 break;
-            case 0x3:  // HAL_PIXEL_FORMAT_RGB_888
+            case 0x3:
                 out_buf->fourcc = DRM_FORMAT_BGR888;
                 out_buf->total_size = out_buf->stride * height * 3;
                 break;
-            case 0x4:  // HAL_PIXEL_FORMAT_RGB_565
+            case 0x4:
                 out_buf->fourcc = DRM_FORMAT_RGB565;
                 out_buf->total_size = out_buf->stride * height * 2;
                 break;
-            case 0x5:  // HAL_PIXEL_FORMAT_BGRA_8888
+            case 0x5:
                 out_buf->fourcc = DRM_FORMAT_ARGB8888;
                 out_buf->total_size = out_buf->stride * height * 4;
                 break;
-            case 0x35: // HAL_PIXEL_FORMAT_YCBCR_420_888 (Generic flexible YUV, typically NV12 in minigbm)
+            case 0x35:  // HAL_PIXEL_FORMAT_YCBCR_420_888, maps to nv12 in cros_gralloc
             default:
                 out_buf->fourcc = DRM_FORMAT_NV12;
                 out_buf->total_size = out_buf->stride * height * 3 / 2;
                 break;
         }
 
-        // Standard linear buffer modifier for virtualized Android framebuffers
-        out_buf->modifier = DRM_FORMAT_MOD_LINEAR;
+        out_buf->modifier = DRM_FORMAT_MOD_LINEAR;  // virtualized gbm surfaces are linear
         return true;
     }
 };
