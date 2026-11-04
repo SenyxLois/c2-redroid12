@@ -17,19 +17,8 @@
 
 #pragma once
 
-#include <C2Component.h>
-#include <C2Buffer.h>
-#include <C2Work.h>
-#include <SimpleC2Component.h>
-#include <C2Config.h>
-
-#include "vaapi/vaapi_wrapper.h"
-#include "vaapi/gralloc_helper.h"
-
-#include <atomic>
-#include <memory>
-#include <mutex>
-#include <condition_variable>
+#include "C2RedroidEnc.h"
+#include <util/C2InterfaceHelper.h>
 
 namespace android {
 namespace hardware {
@@ -37,42 +26,20 @@ namespace media {
 namespace c2 {
 namespace redroid {
 
-class C2RedroidEnc : public SimpleC2Component {
+class C2RedroidHevcEnc : public C2RedroidEnc {
 public:
     class IntfImpl;
 
-    C2RedroidEnc(const std::shared_ptr<IntfImpl> &intfImpl);
-    virtual ~C2RedroidEnc();
+    C2RedroidHevcEnc(const std::shared_ptr<IntfImpl> &intfImpl);
+    C2RedroidHevcEnc(const std::shared_ptr<C2ComponentInterface> &intf);
+    virtual ~C2RedroidHevcEnc() = default;
 
-    c2_status_t onInit() override;
-    c2_status_t onStop() override;
-    void onReset() override;
-    void onRelease() override;
-    c2_status_t onFlush_sm() override;
-    void process(const std::unique_ptr<C2Work> &work,
-                 const std::shared_ptr<C2BlockPool> &pool) override;
-    c2_status_t drain(uint32_t drainMode,
-                      const std::shared_ptr<C2BlockPool> &pool) override;
+    static std::shared_ptr<C2Component> Create(const std::shared_ptr<C2ReflectorHelper> &reflector);
+    static std::shared_ptr<C2ComponentInterface> CreateInterface(const std::shared_ptr<C2ReflectorHelper> &reflector);
 
 protected:
-    virtual CodecType getCodecType() const = 0;
-    virtual const char *getComponentName() const = 0;
-
-private:
-    std::shared_ptr<IntfImpl> mIntf;
-    std::shared_ptr<VaapiWrapper> mVaapi;
-    bool mStarted = false;
-    bool mSawInputEOS = false;
-    bool mSawOutputEOS = false;
-
-    uint32_t mWidth = 1280;
-    uint32_t mHeight = 720;
-    uint32_t mBitrate = 10000000;
-    uint32_t mFrameRate = 60;
-    uint32_t mIntraPeriod = 60;
-
-    bool initEncoder();
-    void releaseEncoder();
+    CodecType getCodecType() const override { return CodecType::HEVC; }
+    const char *getComponentName() const override { return "c2.redroid.hevc.encoder"; }
 };
 
 } // namespace redroid
