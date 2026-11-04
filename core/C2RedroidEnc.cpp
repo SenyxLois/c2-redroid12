@@ -31,6 +31,9 @@ namespace redroid {
 C2RedroidEnc::C2RedroidEnc(const std::shared_ptr<IntfImpl> &intfImpl)
     : SimpleC2Component(intfImpl),
       mIntf(intfImpl) {
+C2RedroidEnc::C2RedroidEnc(const std::shared_ptr<C2ComponentInterface> &intf)
+    : SimpleC2Component(intf),
+      mIntf(intf) {
 }
 
 C2RedroidEnc::~C2RedroidEnc() {
@@ -129,6 +132,7 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     }
 
     const C2ConstGraphicBlock &graphicBlock = inBuffer->data().graphicBlocks().front();
+    C2ConstGraphicBlock graphicBlock = inBuffer->data().graphicBlocks().front();
     uint32_t width = graphicBlock.width();
     uint32_t height = graphicBlock.height();
 
@@ -188,6 +192,7 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     size_t actual_out_size = 0;
     bool is_keyframe = false;
     bool force_keyframe = (work->input.flags & C2FrameData::FLAG_SYNC_FRAME);
+    bool force_keyframe = false;
 
     bool ok = mVaapi->EncodeFrame(input_surface, force_keyframe,
                                   writeView.data(), max_out_size,
@@ -208,6 +213,7 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     if (is_keyframe) {
         work->worklets.front()->output.flags = (C2FrameData::flags_t)(
             work->worklets.front()->output.flags | C2FrameData::FLAG_SYNC_FRAME);
+        outBuffer->setInfo(std::make_shared<C2StreamPictureTypeMaskInfo::output>(0u, C2Config::SYNC_FRAME));
     }
 
     work->worklets.front()->output.ordinal = work->input.ordinal;
