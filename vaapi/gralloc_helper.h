@@ -20,7 +20,6 @@
 #include "vaapi_defs.h"
 #include <cutils/native_handle.h>
 #include <log/log.h>
-#include <drm_fourcc.h>
 #include <drm/drm_fourcc.h>
 
 #define LOG_TAG "C2RedroidGralloc"
@@ -48,9 +47,20 @@ public:
         out_buf->prime_fd = handle->data[0];
         out_buf->width = width;
         out_buf->height = height;
-        out_buf->stride = stride > 0 ? stride : width;
 
-        switch (format) {
+        // In redroid gralloc.gbm: data[5] is format, data[7] is stride
+        uint32_t real_format = format;
+        if (handle->numInts >= 6 && handle->data[5] != 0) {
+            real_format = (uint32_t)handle->data[5];
+        }
+
+        uint32_t real_stride = (stride > 0) ? stride : width;
+        if (handle->numInts >= 8 && handle->data[7] > 0) {
+            real_stride = (uint32_t)handle->data[7];
+        }
+        out_buf->stride = real_stride;
+
+        switch (real_format) {
             case 0x11:  // HAL_PIXEL_FORMAT_YCrCb_420_SP
                 out_buf->fourcc = DRM_FORMAT_NV21;
                 out_buf->total_size = out_buf->stride * height * 3 / 2;
@@ -61,23 +71,28 @@ public:
                 break;
             case 0x1:
                 out_buf->fourcc = DRM_FORMAT_ABGR8888;
-                out_buf->total_size = out_buf->stride * height * 4;
+                if (out_buf->stride < width * 4) out_buf->stride = width * 4;
+                out_buf->total_size = out_buf->stride * height;
                 break;
             case 0x2:
                 out_buf->fourcc = DRM_FORMAT_XBGR8888;
-                out_buf->total_size = out_buf->stride * height * 4;
+                if (out_buf->stride < width * 4) out_buf->stride = width * 4;
+                out_buf->total_size = out_buf->stride * height;
                 break;
             case 0x3:
                 out_buf->fourcc = DRM_FORMAT_BGR888;
-                out_buf->total_size = out_buf->stride * height * 3;
+                if (out_buf->stride < width * 3) out_buf->stride = width * 3;
+                out_buf->total_size = out_buf->stride * height;
                 break;
             case 0x4:
                 out_buf->fourcc = DRM_FORMAT_RGB565;
-                out_buf->total_size = out_buf->stride * height * 2;
+                if (out_buf->stride < width * 2) out_buf->stride = width * 2;
+                out_buf->total_size = out_buf->stride * height;
                 break;
             case 0x5:
                 out_buf->fourcc = DRM_FORMAT_ARGB8888;
-                out_buf->total_size = out_buf->stride * height * 4;
+                if (out_buf->stride < width * 4) out_buf->stride = width * 4;
+                out_buf->total_size = out_buf->stride * height;
                 break;
             case 0x35:  // HAL_PIXEL_FORMAT_YCBCR_420_888, maps to nv12 in cros_gralloc
             default:
@@ -86,7 +101,17 @@ public:
                 break;
         }
 
-        out_buf->modifier = DRM_FORMAT_MOD_LINEAR;  // virtualized gbm surfaces are linear
+        // In redroid gralloc.gbm, data[9] and data[10] store uint64_t DRM modifier
+        uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+        if (handle->numInts >= 10) {
+            memcpy(&modifier, &handle->data[9], sizeof(uint64_t));
+        }
+        out_buf->modifier = modifier;
+
+        ALOGI("GrallocHelper: prime_fd=%d, %ux%u, format=0x%x (fourcc=0x%x), stride=%u, mod=0x%llx",
+              out_buf->prime_fd, width, height, real_format, out_buf->fourcc,
+              out_buf->stride, (unsigned long long)out_buf->modifier);
+
         return true;
     }
 };
