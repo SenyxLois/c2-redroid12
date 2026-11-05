@@ -18,6 +18,7 @@
 #pragma once
 
 #include "C2RedroidEnc.h"
+#include <util/C2InterfaceHelper.h>
 
 namespace android {
 namespace hardware {
@@ -29,8 +30,11 @@ class C2RedroidHevcEnc : public C2RedroidEnc {
 public:
     class IntfImpl;
 
-    C2RedroidHevcEnc(const std::shared_ptr<IntfImpl> &intfImpl);
+    C2RedroidHevcEnc(const std::shared_ptr<C2ComponentInterface> &intf);
     virtual ~C2RedroidHevcEnc() = default;
+
+    static std::shared_ptr<C2Component> Create(const std::shared_ptr<C2ReflectorHelper> &reflector);
+    static std::shared_ptr<C2ComponentInterface> CreateInterface(const std::shared_ptr<C2ReflectorHelper> &reflector);
 
 protected:
     CodecType getCodecType() const override { return CodecType::HEVC; }
