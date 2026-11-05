@@ -50,8 +50,8 @@ struct VaapiEncoderConfig {
     uint32_t intra_period = 60;
     uint32_t ip_period = 1;  // pure IPPP, no b-frames keeps latency flat for streaming
     RateControlMode rc_mode = RateControlMode::CBR;
-    uint32_t initial_qp = 26;
-    uint32_t min_qp = 10;
+    uint32_t initial_qp = 20;
+    uint32_t min_qp = 1;
     uint32_t max_qp = 51;
     bool enable_intra_refresh = true;
     const char *drm_node = "/dev/dri/renderD128";
