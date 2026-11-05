@@ -18,7 +18,9 @@
 #include "C2RedroidComponentStore.h"
 #include "C2RedroidAvcEnc.h"
 #include "C2RedroidHevcEnc.h"
+#include <C2Config.h>
 #include <log/log.h>
+#include <string.h>
 
 #define LOG_TAG "C2RedroidStore"
 
@@ -61,13 +63,9 @@ c2_status_t C2RedroidComponentStore::createComponent(
     component->reset();
 
     if (name == "c2.redroid.avc.encoder") {
-        auto intf = std::make_shared<C2RedroidAvcEnc::IntfImpl>(mReflector);
-        *component = std::make_shared<C2RedroidAvcEnc>(intf);
         *component = C2RedroidAvcEnc::Create(mReflector);
         return C2_OK;
     } else if (name == "c2.redroid.hevc.encoder") {
-        auto intf = std::make_shared<C2RedroidHevcEnc::IntfImpl>(mReflector);
-        *component = std::make_shared<C2RedroidHevcEnc>(intf);
         *component = C2RedroidHevcEnc::Create(mReflector);
         return C2_OK;
     }
@@ -81,13 +79,9 @@ c2_status_t C2RedroidComponentStore::createInterface(
     interface->reset();
 
     if (name == "c2.redroid.avc.encoder") {
-        *interface = std::make_shared<SimpleInterface<C2RedroidAvcEnc::IntfImpl>>(
-            name.c_str(), 0, std::make_shared<C2RedroidAvcEnc::IntfImpl>(mReflector));
         *interface = C2RedroidAvcEnc::CreateInterface(mReflector);
         return C2_OK;
     } else if (name == "c2.redroid.hevc.encoder") {
-        *interface = std::make_shared<SimpleInterface<C2RedroidHevcEnc::IntfImpl>>(
-            name.c_str(), 0, std::make_shared<C2RedroidHevcEnc::IntfImpl>(mReflector));
         *interface = C2RedroidHevcEnc::CreateInterface(mReflector);
         return C2_OK;
     }
@@ -120,8 +114,31 @@ c2_status_t C2RedroidComponentStore::query_sm(
 c2_status_t C2RedroidComponentStore::config_sm(
         const std::vector<C2Param *> &params,
         std::vector<std::unique_ptr<C2SettingResult>> *const failures) {
-    (void)params;
     (void)failures;
+    for (C2Param *param : params) {
+        if (!param) continue;
+        if (param->type() == C2StoreDmaBufUsageInfo::PARAM_TYPE) {
+            C2StoreDmaBufUsageInfo *dmaUsage = (C2StoreDmaBufUsageInfo *)param;
+            long long usage = (long long)dmaUsage->m.usage;
+            size_t maxLen = dmaUsage->flexCount();
+            if (maxLen > 0) {
+                const char *heap = "system";
+                if (!(usage & (C2MemoryUsage::CPU_READ | C2MemoryUsage::CPU_WRITE))) {
+                    heap = "system-uncached";
+                }
+                strncpy(dmaUsage->m.heapName, heap, maxLen - 1);
+                dmaUsage->m.heapName[maxLen - 1] = '\0';
+                dmaUsage->m.allocFlags = 0;
+                ALOGI("config_sm: mapped dmabuf usage 0x%llx to heap '%s'", (unsigned long long)usage, dmaUsage->m.heapName);
+            }
+        } else if (param->type() == C2StoreIonUsageInfo::PARAM_TYPE) {
+            C2StoreIonUsageInfo *ionUsage = (C2StoreIonUsageInfo *)param;
+            ionUsage->heapMask = ~0;
+            ionUsage->allocFlags = 0;
+            ionUsage->minAlignment = 0;
+            ALOGI("config_sm: configured ion usage");
+        }
+    }
     return C2_OK;
 }
 
@@ -135,10 +152,11 @@ c2_status_t C2RedroidComponentStore::querySupportedParams_nb(
     return C2_OK;
 }
 
-c2_status_t C2RedroidComponentStore::querySupportedValues_nb(
 c2_status_t C2RedroidComponentStore::querySupportedValues_sm(
         std::vector<C2FieldSupportedValuesQuery> &fields) const {
-    (void)fields;
+    for (auto &fsv : fields) {
+        fsv.status = C2_BAD_INDEX;
+    }
     return C2_OK;
 }
 
