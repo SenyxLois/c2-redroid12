@@ -1,4 +1,4 @@
-/*
+    /*
  * Copyright (C) 2018 The Android Open Source Project
  * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
@@ -18,8 +18,10 @@
 #pragma once
 
 #include "vaapi_defs.h"
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <sys/types.h>
 #include <vector>
 
 namespace android {
@@ -30,6 +32,8 @@ namespace redroid {
 
 class VaapiWrapper {
 public:
+    using OutputBufferAllocator = std::function<void *(size_t exact_size)>;
+
     static std::shared_ptr<VaapiWrapper> Create(const VaapiEncoderConfig &config);
     ~VaapiWrapper();
 
@@ -46,10 +50,17 @@ public:
                      size_t *out_actual_size,
                      bool *out_is_keyframe);
 
+    bool EncodeFrame(VASurfaceID input_surface,
+                     bool force_keyframe,
+                     const OutputBufferAllocator &allocator,
+                     size_t *out_actual_size,
+                     bool *out_is_keyframe);
+
     bool UpdateBitrate(uint32_t new_bitrate);
     bool RequestKeyFrame();
 
     const VaapiEncoderConfig &GetConfig() const { return mConfig; }
+    int GetDrmFd() const { return mDrmFd; }
 
 private:
     explicit VaapiWrapper(const VaapiEncoderConfig &config);
@@ -62,7 +73,22 @@ private:
 
     bool RenderSequenceParameters();
     bool RenderPictureParameters(VASurfaceID surface, bool is_keyframe);
+    bool RenderPackedHeaders(bool is_keyframe);
     bool RenderSliceParameters(VASurfaceID surface, bool is_keyframe);
+    bool IsSurfaceRgb(VASurfaceID surface_id) const;
+
+    struct SurfaceCacheEntry {
+        dev_t dev = 0;
+        ino_t ino = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t stride = 0;
+        uint32_t fourcc = 0;
+        VASurfaceID surface = VA_INVALID_SURFACE;
+        bool is_rgb = true;
+        uint64_t last_used = 0;
+    };
+    static constexpr size_t kMaxCachedSurfaces = 16;
 
     VaapiEncoderConfig mConfig;
     int mDrmFd = -1;
@@ -71,7 +97,7 @@ private:
     VAContextID mVaContextId = VA_INVALID_ID;
     VABufferID mCodedBuf = VA_INVALID_ID;
 
-    // hardware color conversion (rgba -> nv12)
+    // VPP hardware color conversion pipeline (RGBA -> NV12)
     VAConfigID mVppConfigId = VA_INVALID_ID;
     VAContextID mVppContextId = VA_INVALID_ID;
     VASurfaceID mNv12Surface = VA_INVALID_SURFACE;
@@ -80,8 +106,16 @@ private:
     int mPrevRecon = 1;
     bool mHasReference = false;
 
+    SurfaceCacheEntry mSurfaceCache[kMaxCachedSurfaces]{};
+    uint64_t mCacheTick = 0;
+    VASurfaceID mLastUncachedSurface = VA_INVALID_SURFACE;
+    bool mLastUncachedIsRgb = true;
+
+    std::vector<uint8_t> mCachedSeqHeaders;
+
     uint32_t mFrameIndex = 0;
     bool mForceKeyFrame = false;
+    bool mBitrateNeedsUpdate = false;
     std::mutex mLock;
 };
 
