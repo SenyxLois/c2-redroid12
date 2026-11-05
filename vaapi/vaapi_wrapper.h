@@ -57,6 +57,9 @@ private:
     bool InitDrmDevice();
     bool CreateEncoderContext();
     bool SetupRateControl();
+    bool InitVpp();
+    VASurfaceID ConvertRgbToNv12(VASurfaceID rgb_surface);
+
     bool RenderSequenceParameters();
     bool RenderPictureParameters(VASurfaceID surface, bool is_keyframe);
     bool RenderSliceParameters(VASurfaceID surface, bool is_keyframe);
@@ -67,6 +70,15 @@ private:
     VAConfigID mVaConfigId = VA_INVALID_ID;
     VAContextID mVaContextId = VA_INVALID_ID;
     VABufferID mCodedBuf = VA_INVALID_ID;
+
+    // hardware color conversion (rgba -> nv12)
+    VAConfigID mVppConfigId = VA_INVALID_ID;
+    VAContextID mVppContextId = VA_INVALID_ID;
+    VASurfaceID mNv12Surface = VA_INVALID_SURFACE;
+    VASurfaceID mReconSurfaces[2] = {VA_INVALID_SURFACE, VA_INVALID_SURFACE};
+    int mCurrentRecon = 0;
+    int mPrevRecon = 1;
+    bool mHasReference = false;
 
     uint32_t mFrameIndex = 0;
     bool mForceKeyFrame = false;
