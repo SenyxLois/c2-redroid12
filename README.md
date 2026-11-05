@@ -6,17 +6,8 @@ A Codec2 (C2) Hardware Video Encoder HAL for Redroid (Android 12, 13, and 14+). 
 > [!WARNING]
 > This project is in active development.
 
-- **H.264 (`c2.redroid.avc.encoder`)**: **Working with artifacts.** Encoding works, but output shows visual corruption (vertical green banding/stride padding artifacts along the right frame edge).
-- **H.265 / HEVC (`c2.redroid.hevc.encoder`)**: **Not working.** Fails to initialize during client capture/encoding setup:
-  ```text
-  [server] ERROR: Capture/encoding error: java.lang.IllegalStateException: null
-  [server] INFO: Applying video encoder constraints
-  [server] ERROR: Capture/encoding error: java.lang.IllegalStateException: null
-  ```
-
-### Development Roadmap
-1. Fix H.264 stride/pitch alignment and edge artifacts **(Current priority)**
-2. Diagnose and fix H.265 / HEVC encoder initialization failure
+- **H.264 (`c2.redroid.avc.encoder`)**: **Working well.**
+- **H.265 / HEVC (`c2.redroid.hevc.encoder`)**: **Working well.**
 
 ---
 
