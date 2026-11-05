@@ -68,6 +68,7 @@ bool C2RedroidEnc::initEncoder() {
         return true;
     }
 
+    // Query configured bitrate from component interface
     C2StreamBitrateInfo::output bitrate(0u);
     if (mIntf && mIntf->query_vb({ &bitrate }, {}, C2_MAY_BLOCK, nullptr) == C2_OK && bitrate.value > 0) {
         mBitrate = bitrate.value;
@@ -130,35 +131,32 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    C2StreamBitrateInfo::output bitrate(0u);
-    if (mIntf && mIntf->query_vb({ &bitrate }, {}, C2_DONT_BLOCK, nullptr) == C2_OK && bitrate.value > 0) {
-        if (mBitrate != bitrate.value) {
-            ALOGI("[%s] Bitrate dynamically updated: %u -> %u bps", getComponentName(), mBitrate, bitrate.value);
-            mBitrate = bitrate.value;
-            if (mVaapi) {
-                mVaapi->UpdateBitrate(mBitrate);
-            }
-        }
-    }
-
-    C2StreamSyncFrameIntervalTuning::output syncInterval(0u);
-    if (mIntf && mIntf->query_vb({ &syncInterval }, {}, C2_DONT_BLOCK, nullptr) == C2_OK) {
-        if (syncInterval.value > 0) {
-            uint32_t period = (uint32_t)((syncInterval.value * mFrameRate) / 1000000LL);
-            if (period > 0 && period != mIntraPeriod) {
-                mIntraPeriod = period;
-            }
-        }
-    }
-
+    // Batch query dynamic bitrate, sync interval, and immediate sync frame request in a single call
     bool force_keyframe = false;
-    C2StreamRequestSyncFrameTuning::output requestSync(0u);
-    if (mIntf && mIntf->query_vb({ &requestSync }, {}, C2_DONT_BLOCK, nullptr) == C2_OK) {
-        if (requestSync.value) {
-            force_keyframe = true;
-            C2StreamRequestSyncFrameTuning::output clearSync(0u, C2_FALSE);
-            std::vector<std::unique_ptr<C2SettingResult>> failures;
-            mIntf->config_vb({ &clearSync }, C2_MAY_BLOCK, &failures);
+    if (mIntf) {
+        C2StreamBitrateInfo::output bitrate(0u);
+        C2StreamSyncFrameIntervalTuning::output syncInterval(0u);
+        C2StreamRequestSyncFrameTuning::output requestSync(0u);
+        if (mIntf->query_vb({ &bitrate, &syncInterval, &requestSync }, {}, C2_DONT_BLOCK, nullptr) == C2_OK) {
+            if (bitrate.value > 0 && mBitrate != bitrate.value) {
+                ALOGI("[%s] Bitrate dynamically updated: %u -> %u bps", getComponentName(), mBitrate, bitrate.value);
+                mBitrate = bitrate.value;
+                if (mVaapi) {
+                    mVaapi->UpdateBitrate(mBitrate);
+                }
+            }
+            if (syncInterval.value > 0) {
+                uint32_t period = (uint32_t)((syncInterval.value * mFrameRate) / 1000000LL);
+                if (period > 0 && period != mIntraPeriod) {
+                    mIntraPeriod = period;
+                }
+            }
+            if (requestSync.value) {
+                force_keyframe = true;
+                C2StreamRequestSyncFrameTuning::output clearSync(0u, C2_FALSE);
+                std::vector<std::unique_ptr<C2SettingResult>> failures;
+                mIntf->config_vb({ &clearSync }, C2_MAY_BLOCK, &failures);
+            }
         }
     }
 
@@ -172,10 +170,10 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     uint32_t width = graphicBlock.width();
     uint32_t height = graphicBlock.height();
 
-    // wait until rendering completes before reading prime buffer
+    // Ensure the GPU has finished rendering to the graphic buffer before encoding
     C2Fence fence = graphicBlock.fence();
     if (fence.valid() && !fence.ready()) {
-        c2_status_t wait_res = fence.wait(100000000LL);  // 100ms timeout
+        c2_status_t wait_res = fence.wait(100000000LL); // 100ms timeout
         if (wait_res != C2_OK) {
             ALOGW("graphicBlock acquire fence wait returned %d", wait_res);
         }
@@ -198,11 +196,10 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    // cros_gralloc / minigbm layout: data[5] is hal format, data[7] is stride
     uint32_t buf_stride = (handle->numInts >= 8 && handle->data[7] > 0) ? (uint32_t)handle->data[7] : width;
-    uint32_t buf_format = (handle->numInts >= 6 && handle->data[5] != 0) ? (uint32_t)handle->data[5] : 0x35;
 
     DrmPrimeBuffer drm_buf{};
+    uint32_t buf_format = (handle->numInts >= 6 && handle->data[5] != 0) ? (uint32_t)handle->data[5] : 0x35;
     if (!GrallocHelper::ExtractDrmBuffer(handle, width, height, buf_format, buf_stride, &drm_buf)) {
         ALOGE("Failed to extract DRM PRIME parameters from handle");
         work->result = C2_CORRUPTED;
@@ -216,58 +213,58 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
         return;
     }
 
-    size_t max_out_size = width * height * 3 / 2;
     std::shared_ptr<C2LinearBlock> outBlock;
-    c2_status_t status = pool->fetchLinearBlock(
-        max_out_size,
-        { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE },
-        &outBlock);
-
-    if (status != C2_OK || !outBlock) {
-        ALOGW("pool->fetchLinearBlock failed: %d, trying fallback basic linear pool...", status);
-        if (!mFallbackPool) {
-            auto store = GetCodec2PlatformAllocatorStore();
-            std::shared_ptr<C2Allocator> alloc;
-            if (store && store->fetchAllocator(C2PlatformAllocatorStore::DMABUFHEAP, &alloc) == C2_OK && alloc) {
-                mFallbackPool = std::make_shared<C2BasicLinearBlockPool>(alloc);
-            }
-        }
-        if (mFallbackPool) {
-            status = mFallbackPool->fetchLinearBlock(
-                max_out_size,
-                { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE },
-                &outBlock);
-        }
-    }
-
-    if (status != C2_OK || !outBlock) {
-        ALOGE("Failed to fetch output C2LinearBlock from pool: %d", status);
-        mVaapi->DestroySurface(input_surface);
-        work->result = C2_NO_MEMORY;
-        return;
-    }
-
-    C2WriteView writeView = outBlock->map().get();
-    if (writeView.error() != C2_OK) {
-        ALOGE("Failed to map output C2LinearBlock: %d", writeView.error());
-        mVaapi->DestroySurface(input_surface);
-        work->result = C2_CORRUPTED;
-        return;
-    }
+    std::unique_ptr<C2WriteView> writeView;
+    c2_status_t alloc_status = C2_OK;
 
     size_t actual_out_size = 0;
     bool is_keyframe = false;
 
-    bool ok = mVaapi->EncodeFrame(input_surface, force_keyframe,
-                                  writeView.data(), max_out_size,
-                                  &actual_out_size, &is_keyframe);
+    bool ok = mVaapi->EncodeFrame(
+        input_surface, force_keyframe,
+        [&](size_t exact_size) -> void * {
+            size_t alloc_size = exact_size > 64 ? exact_size : 64;
+            alloc_status = pool->fetchLinearBlock(
+                alloc_size,
+                { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE },
+                &outBlock);
+            if (alloc_status != C2_OK || !outBlock) {
+                if (!mFallbackPool) {
+                    auto store = GetCodec2PlatformAllocatorStore();
+                    std::shared_ptr<C2Allocator> alloc;
+                    if (store && store->fetchAllocator(C2PlatformAllocatorStore::DMABUFHEAP, &alloc) == C2_OK && alloc) {
+                        mFallbackPool = std::make_shared<C2BasicLinearBlockPool>(alloc);
+                    }
+                }
+                if (mFallbackPool) {
+                    alloc_status = mFallbackPool->fetchLinearBlock(
+                        alloc_size,
+                        { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE },
+                        &outBlock);
+                }
+            }
+            if (alloc_status != C2_OK || !outBlock) {
+                ALOGE("Failed to fetch output C2LinearBlock (%zu bytes): %d", alloc_size, alloc_status);
+                return nullptr;
+            }
+            writeView = std::make_unique<C2WriteView>(outBlock->map().get());
+            if (writeView->error() != C2_OK) {
+                ALOGE("Failed to map output C2LinearBlock: %d", writeView->error());
+                return nullptr;
+            }
+            return writeView->data();
+        },
+        &actual_out_size, &is_keyframe);
 
-    // drop the transient va surface; the underlying dma-buf stays alive in graphicBlock
+    // Release WriteView mapping before sharing the output linear block
+    writeView.reset();
+
+    // Release transient surface if uncached; cached BufferQueue surfaces stay alive in mVaapi
     mVaapi->DestroySurface(input_surface);
 
-    if (!ok || actual_out_size == 0) {
+    if (!ok || actual_out_size == 0 || !outBlock) {
         ALOGE("Hardware frame encoding failed in VA-API");
-        work->result = C2_CORRUPTED;
+        work->result = (alloc_status != C2_OK) ? C2_NO_MEMORY : C2_CORRUPTED;
         return;
     }
 
