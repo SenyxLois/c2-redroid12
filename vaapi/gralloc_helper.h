@@ -108,7 +108,7 @@ public:
         }
         out_buf->modifier = modifier;
 
-        ALOGI("GrallocHelper: prime_fd=%d, %ux%u, format=0x%x (fourcc=0x%x), stride=%u, mod=0x%llx",
+        ALOGV("GrallocHelper: prime_fd=%d, %ux%u, format=0x%x (fourcc=0x%x), stride=%u, mod=0x%llx",
               out_buf->prime_fd, width, height, real_format, out_buf->fourcc,
               out_buf->stride, (unsigned long long)out_buf->modifier);
 
