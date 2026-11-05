@@ -30,7 +30,6 @@ class C2RedroidAvcEnc : public C2RedroidEnc {
 public:
     class IntfImpl;
 
-    C2RedroidAvcEnc(const std::shared_ptr<IntfImpl> &intfImpl);
     C2RedroidAvcEnc(const std::shared_ptr<C2ComponentInterface> &intf);
     virtual ~C2RedroidAvcEnc() = default;
 

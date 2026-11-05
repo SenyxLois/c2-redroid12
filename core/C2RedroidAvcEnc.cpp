@@ -16,7 +16,6 @@
  */
 
 #include "C2RedroidAvcEnc.h"
-#include <C2InterfaceHelper.h>
 #include <SimpleC2Interface.h>
 #include <util/C2InterfaceHelper.h>
 
@@ -26,22 +25,23 @@ namespace media {
 namespace c2 {
 namespace redroid {
 
-class C2RedroidAvcEnc::IntfImpl : public C2InterfaceHelper {
+class C2RedroidAvcEnc::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-        setHelper(helper);
+        : SimpleInterface<void>::BaseParams(
+            helper,
+            "c2.redroid.avc.encoder",
+            C2Component::KIND_ENCODER,
+            C2Component::DOMAIN_VIDEO,
+            "video/avc") {
+        noInputLatency();
+        noOutputLatency();
+        noPipelineLatency();
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noTimeStretch();
         setDerivedInstance(this);
-
-        addParameter(
-            DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-            .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::GRAPHIC))
-            .build());
-
-        addParameter(
-            DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-            .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-            .build());
 
         addParameter(
             DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
@@ -55,38 +55,73 @@ public:
 
         addParameter(
             DefineParam(mBitrate, C2_PARAMKEY_BITRATE)
-            .withDefault(new C2StreamBitrateInfo::output(0u, 10000000))
-            .withFields({C2F(mBitrate, value).inRange(64000, 100000000)})
+            .withDefault(new C2StreamBitrateInfo::output(0u, 20000000))
+            .withFields({C2F(mBitrate, value).inRange(64000, 200000000)})
             .withSetter(BitrateSetter)
+            .build());
+
+        addParameter(
+            DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
+            .withConstValue(new C2StreamUsageTuning::input(
+                0u, (uint64_t)(0x10000 | 0x100 | 0x200)))  // hw encoder + texture + render flags for gralloc
+            .build());
+
+        addParameter(
+            DefineParam(mRequestSync, C2_PARAMKEY_REQUEST_SYNC_FRAME)
+            .withDefault(new C2StreamRequestSyncFrameTuning::output(0u, C2_FALSE))
+            .withFields({C2F(mRequestSync, value).any()})
+            .withSetter(RequestSyncSetter)
+            .build());
+
+        addParameter(
+            DefineParam(mSyncFramePeriod, C2_PARAMKEY_SYNC_FRAME_INTERVAL)
+            .withDefault(new C2StreamSyncFrameIntervalTuning::output(0u, 1000000))
+            .withFields({C2F(mSyncFramePeriod, value).any()})
+            .withSetter(SyncFramePeriodSetter)
             .build());
     }
 
-    static C2R SizeSetter(bool mayBlock, C2P<C2StreamPictureSizeInfo::input> &me) {
     static C2R SizeSetter(bool mayBlock, const C2P<C2StreamPictureSizeInfo::input> &oldMe,
                           C2P<C2StreamPictureSizeInfo::input> &me) {
         (void)mayBlock;
-        return me.F(me.v.width).validate() ? C2R::Ok() : C2R::BadValue();
-        (void)oldMe;
-        (void)me;
-        return C2R::Ok();
+        C2R res = C2R::Ok();
+        if (me.v.width < 64 || me.v.width > 4096) {
+            me.set().width = oldMe.v.width;
+            res = res.plus(C2SettingResultBuilder::BadValue(me.F(me.v.width)));
+        }
+        if (me.v.height < 64 || me.v.height > 4096) {
+            me.set().height = oldMe.v.height;
+            res = res.plus(C2SettingResultBuilder::BadValue(me.F(me.v.height)));
+        }
+        return res;
     }
 
     static C2R BitrateSetter(bool mayBlock, C2P<C2StreamBitrateInfo::output> &me) {
         (void)mayBlock;
-        return me.F(me.v.value).validate() ? C2R::Ok() : C2R::BadValue();
+        (void)me;
+        return C2R::Ok();
+    }
+
+    static C2R RequestSyncSetter(bool mayBlock, C2P<C2StreamRequestSyncFrameTuning::output> &me) {
+        (void)mayBlock;
+        (void)me;
+        return C2R::Ok();
+    }
+
+    static C2R SyncFramePeriodSetter(bool mayBlock, C2P<C2StreamSyncFrameIntervalTuning::output> &me) {
+        (void)mayBlock;
         (void)me;
         return C2R::Ok();
     }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
     std::shared_ptr<C2StreamPictureSizeInfo::input> mSize;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
+    std::shared_ptr<C2StreamUsageTuning::input> mUsage;
+    std::shared_ptr<C2StreamRequestSyncFrameTuning::output> mRequestSync;
+    std::shared_ptr<C2StreamSyncFrameIntervalTuning::output> mSyncFramePeriod;
 };
 
-C2RedroidAvcEnc::C2RedroidAvcEnc(const std::shared_ptr<IntfImpl> &intfImpl)
-    : C2RedroidEnc(intfImpl) {
 C2RedroidAvcEnc::C2RedroidAvcEnc(const std::shared_ptr<C2ComponentInterface> &intf)
     : C2RedroidEnc(intf) {
 }
