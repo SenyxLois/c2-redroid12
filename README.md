@@ -1,5 +1,24 @@
 A Codec2 (C2) Hardware Video Encoder HAL for Redroid (Android 12, 13, and 14+). It replaces the older OpenMAX (OMX) subsystem with a VA-API hardware pipeline for better performance.
 
+## Current Status & Known Issues
+
+> [!WARNING]
+> This project is in active development.
+
+- **H.264 (`c2.redroid.avc.encoder`)**: **Working with artifacts.** Encoding works, but output shows visual corruption (vertical green banding/stride padding artifacts along the right frame edge).
+- **H.265 / HEVC (`c2.redroid.hevc.encoder`)**: **Not working.** Fails to initialize during client capture/encoding setup:
+  ```text
+  [server] ERROR: Capture/encoding error: java.lang.IllegalStateException: null
+  [server] INFO: Applying video encoder constraints
+  [server] ERROR: Capture/encoding error: java.lang.IllegalStateException: null
+  ```
+
+### Development Roadmap
+1. Fix H.264 stride/pitch alignment and edge artifacts **(Current priority)**
+2. Diagnose and fix H.265 / HEVC encoder initialization failure
+
+---
+
 ## How it works
 
 - **Multilib support**: Builds both 32-bit and 64-bit libraries. On 64-bit systems, the HAL daemon runs natively as 64-bit, avoiding 32-to-64-bit translation overhead for apps like scrcpy, games, or WebRTC.
