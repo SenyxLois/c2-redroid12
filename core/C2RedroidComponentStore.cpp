@@ -129,14 +129,14 @@ c2_status_t C2RedroidComponentStore::config_sm(
                 strncpy(dmaUsage->m.heapName, heap, maxLen - 1);
                 dmaUsage->m.heapName[maxLen - 1] = '\0';
                 dmaUsage->m.allocFlags = 0;
-                ALOGI("config_sm: mapped dmabuf usage 0x%llx to heap '%s'", (unsigned long long)usage, dmaUsage->m.heapName);
+                ALOGV("config_sm: mapped dmabuf usage 0x%llx to heap '%s'", (unsigned long long)usage, dmaUsage->m.heapName);
             }
         } else if (param->type() == C2StoreIonUsageInfo::PARAM_TYPE) {
             C2StoreIonUsageInfo *ionUsage = (C2StoreIonUsageInfo *)param;
             ionUsage->heapMask = ~0;
             ionUsage->allocFlags = 0;
             ionUsage->minAlignment = 0;
-            ALOGI("config_sm: configured ion usage");
+            ALOGV("config_sm: configured ion usage");
         }
     }
     return C2_OK;
