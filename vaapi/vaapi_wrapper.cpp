@@ -326,7 +326,19 @@ void GenerateHevcSequenceHeaders(uint32_t width, uint32_t height, uint32_t fps, 
     AppendHevcNal(out, 34, pps.flushRbsp());
 }
 
-void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t> &out) {
+uint32_t ComputeTargetQp(uint32_t bit_rate, uint32_t width, uint32_t height, uint32_t fps) {
+    double pixels_per_sec = static_cast<double>(width) * static_cast<double>(height) *
+                            static_cast<double>(fps > 0 ? fps : 60);
+    if (pixels_per_sec <= 0.0) return 26;
+    double bpp = static_cast<double>(bit_rate) / pixels_per_sec;
+    if (bpp >= 0.25) return 22;
+    if (bpp >= 0.14) return 25;
+    if (bpp >= 0.07) return 28;
+    if (bpp >= 0.035) return 31;
+    return 34;
+}
+
+void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, int32_t slice_qp_delta, std::vector<uint8_t> &out) {
     out.clear();
     BitWriter sw;
     sw.writeBit(1);           // first_slice_segment_in_pic_flag = 1
@@ -338,7 +350,7 @@ void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t
         sw.writeUe(2);        // slice_type = 2 (I)
         sw.writeBit(1);       // slice_sao_luma_flag = 1
         sw.writeBit(1);       // slice_sao_chroma_flag = 1
-        sw.writeSe(0);        // slice_qp_delta = 0
+        sw.writeSe(slice_qp_delta); // slice_qp_delta
         sw.writeBit(0);       // slice_loop_filter_across_slices_enabled_flag = 0
         AppendHevcNal(out, 19, sw.flushRbsp()); // IDR_W_RADL = 19
     } else {
@@ -357,7 +369,7 @@ void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t
         sw.writeBit(0);       // mvd_l1_zero_flag = 0
         sw.writeBit(1);       // collocated_from_l0_flag = 1
         sw.writeUe(0);        // five_minus_max_num_merge_cand = 0
-        sw.writeSe(0);        // slice_qp_delta = 0
+        sw.writeSe(slice_qp_delta); // slice_qp_delta
         sw.writeBit(0);       // slice_loop_filter_across_slices_enabled_flag = 0
         AppendHevcNal(out, 1, sw.flushRbsp());  // TRAIL_R = 1
     }
@@ -482,8 +494,27 @@ void VaapiWrapper::Deinitialize() {
 bool VaapiWrapper::InitVpp() {
     if (!mVaDisplay) return false;
 
-    VAStatus status = vaCreateConfig(mVaDisplay, VAProfileNone, VAEntrypointVideoProc,
-                                     nullptr, 0, &mVppConfigId);
+    VASurfaceAttrib attr{};
+    attr.type = VASurfaceAttribPixelFormat;
+    attr.flags = VA_SURFACE_ATTRIB_SETTABLE;
+    attr.value.type = VAGenericValueTypeInteger;
+    attr.value.value.i = VA_FOURCC_NV12;
+
+    VAStatus status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
+                                       mConfig.width, mConfig.height,
+                                       mReconSurfaces, 2, &attr, 1);
+    if (status != VA_STATUS_SUCCESS) {
+        ALOGW("vaCreateSurfaces for recon DPB surfaces failed: %s", vaErrorStr(status));
+    }
+
+    if (mDirectRgbInput) {
+        ALOGI("Intel VDEnc direct RGB32 SFC enabled: bypassing VPP pass (Recon [%d, %d])",
+              mReconSurfaces[0], mReconSurfaces[1]);
+        return true;
+    }
+
+    status = vaCreateConfig(mVaDisplay, VAProfileNone, VAEntrypointVideoProc,
+                            nullptr, 0, &mVppConfigId);
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaCreateConfig for VPP failed: %s", vaErrorStr(status));
         return false;
@@ -496,12 +527,6 @@ bool VaapiWrapper::InitVpp() {
         return false;
     }
 
-    VASurfaceAttrib attr{};
-    attr.type = VASurfaceAttribPixelFormat;
-    attr.flags = VA_SURFACE_ATTRIB_SETTABLE;
-    attr.value.type = VAGenericValueTypeInteger;
-    attr.value.value.i = VA_FOURCC_NV12;
-
     status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
                               mConfig.width, mConfig.height,
                               &mNv12Surface, 1, &attr, 1);
@@ -510,14 +535,7 @@ bool VaapiWrapper::InitVpp() {
         return false;
     }
 
-    status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
-                              mConfig.width, mConfig.height,
-                              mReconSurfaces, 2, &attr, 1);
-    if (status != VA_STATUS_SUCCESS) {
-        ALOGW("vaCreateSurfaces for recon DPB surfaces failed: %s", vaErrorStr(status));
-    }
-
-    ALOGI("VA-API VPP & DPB initialized: NV12 %d, Recon [%d, %d]",
+    ALOGI("VA-API VEBOX VPP & DPB initialized: NV12 %d, Recon [%d, %d]",
           mNv12Surface, mReconSurfaces[0], mReconSurfaces[1]);
     return true;
 }
@@ -579,13 +597,44 @@ bool VaapiWrapper::CreateEncoderContext() {
     VAProfile profile = (mConfig.codec == CodecType::HEVC) ? VAProfileHEVCMain : VAProfileH264Main;
     VAEntrypoint entrypoint = VAEntrypointEncSlice;
 
+    mDirectRgbInput = false;
+    mUsingCqp = false;
+    mActiveQp = ComputeTargetQp(mConfig.bit_rate, mConfig.width, mConfig.height, mConfig.frame_rate);
+
+    uint32_t rt_format = VA_RT_FORMAT_YUV420;
+    uint32_t rc_mode = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+
+    // Probe Intel Low-Power VDEnc (VAEntrypointEncSliceLP) to keep 3D Render engine at 0%
+    VAConfigAttrib lp_attribs[2]{};
+    lp_attribs[0].type = VAConfigAttribRTFormat;
+    lp_attribs[1].type = VAConfigAttribRateControl;
+    if (vaGetConfigAttributes(mVaDisplay, profile, VAEntrypointEncSliceLP, lp_attribs, 2) == VA_STATUS_SUCCESS &&
+        lp_attribs[0].value != VA_ATTRIB_NOT_SUPPORTED &&
+        lp_attribs[1].value != VA_ATTRIB_NOT_SUPPORTED) {
+        entrypoint = VAEntrypointEncSliceLP;
+        if (lp_attribs[0].value & VA_RT_FORMAT_RGB32) {
+            rt_format = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_RGB32;
+            mDirectRgbInput = true;
+        }
+        if (lp_attribs[1].value & rc_mode) {
+            // HuC firmware loaded: CBR/VBR supported on VDEnc
+        } else if (lp_attribs[1].value & VA_RC_CBR) {
+            rc_mode = VA_RC_CBR;
+        } else if (lp_attribs[1].value & VA_RC_VBR) {
+            rc_mode = VA_RC_VBR;
+        } else if (lp_attribs[1].value & VA_RC_CQP) {
+            rc_mode = VA_RC_CQP;
+            mUsingCqp = true;
+        }
+    }
+
     VAConfigAttrib attribs[3]{};
     int num_attribs = 2;
     attribs[0].type = VAConfigAttribRTFormat;
-    attribs[0].value = VA_RT_FORMAT_YUV420;
+    attribs[0].value = rt_format;
 
     attribs[1].type = VAConfigAttribRateControl;
-    attribs[1].value = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+    attribs[1].value = rc_mode;
 
     if (mConfig.codec == CodecType::HEVC) {
         attribs[2].type = VAConfigAttribEncPackedHeaders;
@@ -594,6 +643,15 @@ bool VaapiWrapper::CreateEncoderContext() {
     }
 
     VAStatus status = vaCreateConfig(mVaDisplay, profile, entrypoint, attribs, num_attribs, &mVaConfigId);
+    if (status != VA_STATUS_SUCCESS && entrypoint == VAEntrypointEncSliceLP) {
+        ALOGW("VAEntrypointEncSliceLP config failed (%s), falling back to VAEntrypointEncSlice", vaErrorStr(status));
+        entrypoint = VAEntrypointEncSlice;
+        mDirectRgbInput = false;
+        mUsingCqp = false;
+        attribs[0].value = VA_RT_FORMAT_YUV420;
+        attribs[1].value = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+        status = vaCreateConfig(mVaDisplay, profile, entrypoint, attribs, num_attribs, &mVaConfigId);
+    }
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaCreateConfig failed for profile %d: %s", profile, vaErrorStr(status));
         return false;
@@ -615,13 +673,14 @@ bool VaapiWrapper::CreateEncoderContext() {
     }
 
     mBitrateNeedsUpdate = true;
-    ALOGI("VA-API encoder context ready: %ux%u @ %ufps, target bitrate: %u bps",
+    ALOGI("Intel VA-API encoder context ready (ep=%d, direct_rgb=%d, cqp=%d, qp=%u): %ux%u @ %ufps, %u bps",
+          entrypoint, mDirectRgbInput, mUsingCqp, mActiveQp,
           mConfig.width, mConfig.height, mConfig.frame_rate, mConfig.bit_rate);
     return true;
 }
 
 bool VaapiWrapper::SetupRateControl() {
-    // 0. Target Usage / Quality Level = 7 (Fastest / Low-Latency streaming preset)
+    // 0. Target Usage / Quality Level = 7 (Fastest / Low-Latency VDEnc streaming preset)
     uint8_t qbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterBufferQualityLevel)]{};
     auto *misc_q = reinterpret_cast<VAEncMiscParameterBuffer *>(qbuf);
     misc_q->type = VAEncMiscParameterTypeQualityLevel;
@@ -632,6 +691,10 @@ bool VaapiWrapper::SetupRateControl() {
                        sizeof(qbuf), 1, qbuf, &q_buf_id) == VA_STATUS_SUCCESS) {
         vaRenderPicture(mVaDisplay, mVaContextId, &q_buf_id, 1);
         vaDestroyBuffer(mVaDisplay, q_buf_id);
+    }
+
+    if (mUsingCqp) {
+        return true;
     }
 
     // 1. Rate control parameter
@@ -1035,7 +1098,8 @@ bool VaapiWrapper::RenderPackedHeaders(bool is_keyframe) {
     }
 
     std::vector<uint8_t> slice_hdr;
-    GenerateHevcSliceHeader(is_keyframe, mFrameIndex, slice_hdr);
+    int32_t qp_delta = mUsingCqp ? (static_cast<int32_t>(mActiveQp) - 30) : 0;
+    GenerateHevcSliceHeader(is_keyframe, mFrameIndex, qp_delta, slice_hdr);
 
     VAEncPackedHeaderParameterBuffer sh{};
     sh.type = VAEncPackedHeaderSlice;
@@ -1063,6 +1127,9 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
         slice_param.slice_type = is_keyframe ? 2 : 0;  // 2 = I-slice, 0 = P-slice in vaapi
         slice_param.pic_order_cnt_lsb = is_keyframe ? 0 : (mFrameIndex % 16) * 2;
         slice_param.idr_pic_id = 0;
+        if (mUsingCqp) {
+            slice_param.slice_qp_delta = static_cast<int8_t>(static_cast<int32_t>(mActiveQp) - 26);
+        }
 
         for (int i = 0; i < 32; i++) {
             slice_param.RefPicList0[i].picture_id = VA_INVALID_SURFACE;
@@ -1098,6 +1165,9 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
         slice_param.slice_type = is_keyframe ? 2 : 0; // 2: I-slice, 0: GPB B-slice (required by Intel iHD low-delay HEVC)
         slice_param.slice_pic_parameter_set_id = 0;
         slice_param.max_num_merge_cand = 5;
+        if (mUsingCqp) {
+            slice_param.slice_qp_delta = static_cast<int8_t>(static_cast<int32_t>(mActiveQp) - 30);
+        }
         slice_param.slice_fields.bits.last_slice_of_pic_flag = 1;
         slice_param.slice_fields.bits.slice_temporal_mvp_enabled_flag = is_keyframe ? 0 : 1;
         slice_param.slice_fields.bits.slice_sao_luma_flag = 1;
@@ -1159,7 +1229,7 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
     }
 
     VASurfaceID enc_surface = input_surface;
-    if (IsSurfaceRgb(input_surface) && mVppContextId != VA_INVALID_ID && mNv12Surface != VA_INVALID_SURFACE) {
+    if (!mDirectRgbInput && IsSurfaceRgb(input_surface) && mVppContextId != VA_INVALID_ID && mNv12Surface != VA_INVALID_SURFACE) {
         enc_surface = ConvertRgbToNv12(input_surface);
         if (enc_surface == VA_INVALID_SURFACE) {
             ALOGE("Failed to convert RGB surface to NV12 for encoding");
@@ -1269,6 +1339,7 @@ bool VaapiWrapper::UpdateBitrate(uint32_t new_bitrate) {
     std::lock_guard<std::mutex> lock(mLock);
     mConfig.bit_rate = new_bitrate;
     mConfig.max_bit_rate = new_bitrate * 3 / 2;
+    mActiveQp = ComputeTargetQp(new_bitrate, mConfig.width, mConfig.height, mConfig.frame_rate);
     mBitrateNeedsUpdate = true;
     return true;
 }
