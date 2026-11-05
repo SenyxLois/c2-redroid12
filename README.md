@@ -1,4 +1,5 @@
-A Codec2 (C2) Hardware Video Encoder HAL for Redroid (Android 12, 13, and 14+). It replaces the older OpenMAX (OMX) subsystem with a VA-API hardware pipeline for better performance.
+## c2-redroid12 for Intel Hardware
+A Codec2 (C2) Hardware Video Encoder HAL for Redroid (Android 12, 13, and 14+). It replaces the older OpenMAX (OMX) subsystem with a VA-API hardware pipeline for better performance. This c2-redroid12 include patches specifically for intel gpu.
 
 ## Current Status & Known Issues
 
