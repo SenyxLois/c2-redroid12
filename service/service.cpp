@@ -22,7 +22,6 @@
 #include <hidl/HidlSupport.h>
 #include <hidl/HidlTransportSupport.h>
 #include <log/log.h>
-#include <binder/ProcessState.h>
 #include <sys/resource.h>
 #include <sys/time.h>
 
