@@ -116,6 +116,9 @@ private:
     uint32_t mFrameIndex = 0;
     bool mForceKeyFrame = false;
     bool mBitrateNeedsUpdate = false;
+    bool mDirectRgbInput = false;
+    bool mUsingCqp = false;
+    uint32_t mActiveQp = 26;
     std::mutex mLock;
 };
 
