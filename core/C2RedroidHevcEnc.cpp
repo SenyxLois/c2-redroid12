@@ -63,7 +63,7 @@ public:
         addParameter(
             DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
             .withConstValue(new C2StreamUsageTuning::input(
-                0u, (uint64_t)(0x10000 | 0x100 | 0x200)))  // hw encoder + texture + render flags for gralloc
+                0u, (uint64_t)(0x10000 | 0x100 | 0x200) /* GRALLOC_USAGE_HW_VIDEO_ENCODER | HW_TEXTURE | HW_RENDER */))
             .build());
 
         addParameter(
