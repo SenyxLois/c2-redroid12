@@ -507,12 +507,6 @@ bool VaapiWrapper::InitVpp() {
         ALOGW("vaCreateSurfaces for recon DPB surfaces failed: %s", vaErrorStr(status));
     }
 
-    if (mDirectRgbInput) {
-        ALOGI("Intel VDEnc direct RGB32 SFC enabled: bypassing VPP pass (Recon [%d, %d])",
-              mReconSurfaces[0], mReconSurfaces[1]);
-        return true;
-    }
-
     status = vaCreateConfig(mVaDisplay, VAProfileNone, VAEntrypointVideoProc,
                             nullptr, 0, &mVppConfigId);
     if (status != VA_STATUS_SUCCESS) {
@@ -589,7 +583,7 @@ VASurfaceID VaapiWrapper::ConvertRgbToNv12(VASurfaceID rgb_surface) {
     }
 
     vaDestroyBuffer(mVaDisplay, pipeline_buf);
-    // Do not call vaSyncSurface here: let the GPU DRM scheduler pipeline VPP -> Encode directly
+    vaSyncSurface(mVaDisplay, mNv12Surface);
     return mNv12Surface;
 }
 
@@ -597,7 +591,6 @@ bool VaapiWrapper::CreateEncoderContext() {
     VAProfile profile = (mConfig.codec == CodecType::HEVC) ? VAProfileHEVCMain : VAProfileH264Main;
     VAEntrypoint entrypoint = VAEntrypointEncSlice;
 
-    mDirectRgbInput = false;
     mUsingCqp = false;
     mActiveQp = ComputeTargetQp(mConfig.bit_rate, mConfig.width, mConfig.height, mConfig.frame_rate);
 
@@ -612,10 +605,6 @@ bool VaapiWrapper::CreateEncoderContext() {
         lp_attribs[0].value != VA_ATTRIB_NOT_SUPPORTED &&
         lp_attribs[1].value != VA_ATTRIB_NOT_SUPPORTED) {
         entrypoint = VAEntrypointEncSliceLP;
-        if (lp_attribs[0].value & VA_RT_FORMAT_RGB32) {
-            rt_format = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_RGB32;
-            mDirectRgbInput = true;
-        }
         if (lp_attribs[1].value & rc_mode) {
             // HuC firmware loaded: CBR/VBR supported on VDEnc
         } else if (lp_attribs[1].value & VA_RC_CBR) {
@@ -646,7 +635,6 @@ bool VaapiWrapper::CreateEncoderContext() {
     if (status != VA_STATUS_SUCCESS && entrypoint == VAEntrypointEncSliceLP) {
         ALOGW("VAEntrypointEncSliceLP config failed (%s), falling back to VAEntrypointEncSlice", vaErrorStr(status));
         entrypoint = VAEntrypointEncSlice;
-        mDirectRgbInput = false;
         mUsingCqp = false;
         attribs[0].value = VA_RT_FORMAT_YUV420;
         attribs[1].value = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
@@ -673,8 +661,8 @@ bool VaapiWrapper::CreateEncoderContext() {
     }
 
     mBitrateNeedsUpdate = true;
-    ALOGI("Intel VA-API encoder context ready (ep=%d, direct_rgb=%d, cqp=%d, qp=%u): %ux%u @ %ufps, %u bps",
-          entrypoint, mDirectRgbInput, mUsingCqp, mActiveQp,
+    ALOGI("Intel VA-API encoder context ready (ep=%d, cqp=%d, qp=%u): %ux%u @ %ufps, %u bps",
+          entrypoint, mUsingCqp, mActiveQp,
           mConfig.width, mConfig.height, mConfig.frame_rate, mConfig.bit_rate);
     return true;
 }
@@ -1229,7 +1217,7 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
     }
 
     VASurfaceID enc_surface = input_surface;
-    if (!mDirectRgbInput && IsSurfaceRgb(input_surface) && mVppContextId != VA_INVALID_ID && mNv12Surface != VA_INVALID_SURFACE) {
+    if (IsSurfaceRgb(input_surface) && mVppContextId != VA_INVALID_ID && mNv12Surface != VA_INVALID_SURFACE) {
         enc_surface = ConvertRgbToNv12(input_surface);
         if (enc_surface == VA_INVALID_SURFACE) {
             ALOGE("Failed to convert RGB surface to NV12 for encoding");
