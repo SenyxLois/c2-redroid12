@@ -20,7 +20,6 @@ on init
 
 on post-fs-data
     setprop debug.stagefright.ccodec 4
-    # c2 allocator needs rw access to dmabuf system heap
     chmod 0666 /dev/dma_heap/system
     symlink /dev/dma_heap/system /dev/dma_heap/system-uncached
 
