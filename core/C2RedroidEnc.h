@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <condition_variable>
+#include <string>
 
 namespace android {
 namespace hardware {
@@ -72,9 +73,39 @@ private:
     uint32_t mIntraPeriod = 60;
 
     std::shared_ptr<C2BlockPool> mFallbackPool;
+    std::string mComponentName = "c2.redroid.enc";
+
+    // Rolling performance telemetry state (120-frame / 2s window)
+    uint64_t mLastFrameStartUs = 0;
+    uint64_t mLastFlushUs = 0;
+    uint32_t mWinFrames = 0;
+    uint32_t mWinKeyframes = 0;
+    uint64_t mWinBytesSum = 0;
+    uint64_t mWinBytesMax = 0;
+    uint64_t mWinTotalSumUs = 0;
+    uint64_t mWinTotalMaxUs = 0;
+    uint64_t mWinFenceSumUs = 0;
+    uint64_t mWinFenceMaxUs = 0;
+    uint64_t mWinImportSumUs = 0;
+    uint64_t mWinImportMaxUs = 0;
+    uint64_t mWinVppSumUs = 0;
+    uint64_t mWinVppMaxUs = 0;
+    uint64_t mWinEncSubmitSumUs = 0;
+    uint64_t mWinEncSubmitMaxUs = 0;
+    uint64_t mWinEncSyncSumUs = 0;
+    uint64_t mWinEncSyncMaxUs = 0;
+    uint64_t mWinAllocCopySumUs = 0;
+    uint64_t mWinAllocCopyMaxUs = 0;
+    uint64_t mWinInterFrameSumUs = 0;
+    uint64_t mWinInterFrameMaxUs = 0;
+    uint32_t mWinInterFrameCount = 0;
+    uint64_t mPrevCacheHits = 0;
+    uint64_t mPrevCacheMisses = 0;
 
     bool initEncoder();
     void releaseEncoder();
+    void resetPerfWindow(uint64_t now_us);
+    void flushPerfWindow(uint64_t now_us, const VaapiFrameStats &vstats);
 };
 
 } // namespace redroid
