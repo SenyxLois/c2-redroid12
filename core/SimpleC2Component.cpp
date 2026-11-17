@@ -1,6 +1,5 @@
 /*
  * Copyright (C) 2017 The Android Open Source Project
- * Copyright (C) 2026 Xynes / Redroid C2 Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -408,7 +407,6 @@ void SimpleC2Component::finish(
         fillWork(work);
         std::shared_ptr<C2Component::Listener> listener = mExecState.lock()->mListener;
         listener->onWorkDone_nb(shared_from_this(), vec(work));
-        ALOGV("returning pending work");
     }
 }
 
@@ -434,7 +432,6 @@ void SimpleC2Component::cloneAndSend(
         fillWork(work);
         std::shared_ptr<C2Component::Listener> listener = mExecState.lock()->mListener;
         listener->onWorkDone_nb(shared_from_this(), vec(work));
-        ALOGV("cloned and sending work");
     }
 }
 
@@ -537,7 +534,6 @@ bool SimpleC2Component::processQueue() {
         }
     }
 
-    ALOGV("start processing frame #%" PRIu64, work->input.ordinal.frameIndex.peeku());
     // If input buffer list is not empty, it means we have some input to process on.
     // However, input could be a null buffer. In such case, clear the buffer list
     // before making call to process().
@@ -546,7 +542,6 @@ bool SimpleC2Component::processQueue() {
         work->input.buffers.clear();
     }
     process(work, mOutputBlockPool);
-    ALOGV("processed frame #%" PRIu64, work->input.ordinal.frameIndex.peeku());
     Mutexed<WorkQueue>::Locked queue(mWorkQueue);
     if (queue->generation() != generation) {
         ALOGD("work form old generation: was %" PRIu64 " now %" PRIu64,
@@ -563,12 +558,10 @@ bool SimpleC2Component::processQueue() {
     if (work->workletsProcessed != 0u) {
         queue.unlock();
         Mutexed<ExecState>::Locked state(mExecState);
-        ALOGV("returning this work");
         std::shared_ptr<C2Component::Listener> listener = state->mListener;
         state.unlock();
         listener->onWorkDone_nb(shared_from_this(), vec(work));
     } else {
-        ALOGV("queue pending work");
         work->input.buffers.clear();
         std::unique_ptr<C2Work> unexpected;
 
