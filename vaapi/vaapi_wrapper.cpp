@@ -20,6 +20,7 @@
 #include "vaapi_wrapper.h"
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <cstring>
 #include <vector>
@@ -36,6 +37,12 @@ namespace c2 {
 namespace redroid {
 
 namespace {
+
+inline uint64_t NowUs() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000ULL + static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
+}
 
 class BitWriter {
 public:
@@ -598,6 +605,7 @@ bool VaapiWrapper::CreateEncoderContext() {
         ALOGE("vaCreateConfig failed for profile %d: %s", profile, vaErrorStr(status));
         return false;
     }
+    mEntrypoint = static_cast<uint32_t>(entrypoint);
 
     status = vaCreateContext(mVaDisplay, mVaConfigId, mConfig.width, mConfig.height,
                              VA_PROGRESSIVE, nullptr, 0, &mVaContextId);
@@ -657,10 +665,11 @@ bool VaapiWrapper::SetupRateControl() {
     memset(rc_param, 0, sizeof(*rc_param));
 
     rc_param->bits_per_second = mConfig.bit_rate;
-    rc_param->target_percentage = 95;
+    rc_param->target_percentage = (mConfig.rc_mode == RateControlMode::CBR) ? 100 : 95;
     rc_param->window_size = 500;  // 500ms sliding window keeps bit spikes in check without lag
     rc_param->initial_qp = mConfig.initial_qp;
     rc_param->min_qp = mConfig.min_qp;
+    rc_param->max_qp = mConfig.max_qp;
     rc_param->basic_unit_size = 0;
     rc_param->rc_flags.bits.reset = 1;
     rc_param->rc_flags.bits.disable_frame_skip = 1;
@@ -743,7 +752,10 @@ VASurfaceID VaapiWrapper::ImportDrmPrimeSurface(const DrmPrimeBuffer &buf) {
 
     struct stat st{};
     bool has_stat = (fstat(buf.prime_fd, &st) == 0 && st.st_ino != 0);
+    mLastModifier = buf.modifier;
+    mLastFourcc = buf.fourcc;
     if (has_stat) {
+        mLastIno = static_cast<uint64_t>(st.st_ino);
         for (size_t i = 0; i < kMaxCachedSurfaces; ++i) {
             auto &entry = mSurfaceCache[i];
             if (entry.surface != VA_INVALID_SURFACE &&
@@ -754,9 +766,13 @@ VASurfaceID VaapiWrapper::ImportDrmPrimeSurface(const DrmPrimeBuffer &buf) {
                 entry.stride == buf.stride &&
                 entry.fourcc == buf.fourcc) {
                 entry.last_used = ++mCacheTick;
+                mCacheHits++;
+                mLastCacheHit = true;
                 return entry.surface;
             }
         }
+    } else {
+        mLastIno = 0;
     }
 
     VADRMPRIMESurfaceDescriptor prime_desc{};
@@ -821,6 +837,8 @@ VASurfaceID VaapiWrapper::ImportDrmPrimeSurface(const DrmPrimeBuffer &buf) {
               vaErrorStr(status), buf.prime_fd, buf.fourcc, rt_format, buf.width, buf.height);
         return VA_INVALID_SURFACE;
     }
+    mCacheMisses++;
+    mLastCacheHit = false;
 
     if (has_stat) {
         size_t slot = 0;
@@ -1158,9 +1176,16 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
         return false;
     }
 
+    mLastVppUs = 0;
+    mLastEncSubmitUs = 0;
+    mLastEncSyncUs = 0;
+    mLastMapCopyUs = 0;
+
     VASurfaceID enc_surface = input_surface;
     if (IsSurfaceRgb(input_surface) && mVppContextId != VA_INVALID_ID && mNv12Surface != VA_INVALID_SURFACE) {
+        uint64_t t_vpp = NowUs();
         enc_surface = ConvertRgbToNv12(input_surface);
+        mLastVppUs = NowUs() - t_vpp;
         if (enc_surface == VA_INVALID_SURFACE) {
             ALOGE("Failed to convert RGB surface to NV12 for encoding");
             return false;
@@ -1173,6 +1198,7 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
         mFrameIndex = 0;
     }
 
+    uint64_t t_submit = NowUs();
     VAStatus status = vaBeginPicture(mVaDisplay, mVaContextId, enc_surface);
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaBeginPicture failed: %s", vaErrorStr(status));
@@ -1192,19 +1218,23 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
     RenderSliceParameters(enc_surface, is_keyframe);
 
     status = vaEndPicture(mVaDisplay, mVaContextId);
+    mLastEncSubmitUs = NowUs() - t_submit;
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaEndPicture failed: %s", vaErrorStr(status));
         return false;
     }
 
+    uint64_t t_sync = NowUs();
     VASurfaceID sync_target = (mReconSurfaces[mCurrentRecon] != VA_INVALID_SURFACE)
                               ? mReconSurfaces[mCurrentRecon] : enc_surface;
     status = vaSyncSurface(mVaDisplay, sync_target);
+    mLastEncSyncUs = NowUs() - t_sync;
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaSyncSurface failed: %s", vaErrorStr(status));
         return false;
     }
 
+    uint64_t t_map = NowUs();
     VACodedBufferSegment *buf_segment = nullptr;
     status = vaMapBuffer(mVaDisplay, mCodedBuf, (void **)&buf_segment);
     if (status != VA_STATUS_SUCCESS || !buf_segment) {
@@ -1248,6 +1278,7 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
     }
 
     vaUnmapBuffer(mVaDisplay, mCodedBuf);
+    mLastMapCopyUs = NowUs() - t_map;
 
     *out_actual_size = copied;
     if (out_is_keyframe) {
@@ -1271,6 +1302,25 @@ bool VaapiWrapper::UpdateBitrate(uint32_t new_bitrate) {
     mConfig.max_bit_rate = new_bitrate * 3 / 2;
     mBitrateNeedsUpdate = true;
     return true;
+}
+
+VaapiFrameStats VaapiWrapper::GetFrameStats() const {
+    std::lock_guard<std::mutex> lock(mLock);
+    VaapiFrameStats s{};
+    s.vpp_us = mLastVppUs;
+    s.enc_submit_us = mLastEncSubmitUs;
+    s.enc_sync_us = mLastEncSyncUs;
+    s.map_copy_us = mLastMapCopyUs;
+    s.cache_hits = mCacheHits;
+    s.cache_misses = mCacheMisses;
+    s.last_ino = mLastIno;
+    s.last_modifier = mLastModifier;
+    s.last_fourcc = mLastFourcc;
+    s.entrypoint = mEntrypoint;
+    s.using_cqp = mUsingCqp;
+    s.active_qp = mActiveQp;
+    s.last_cache_hit = mLastCacheHit;
+    return s;
 }
 
 } // namespace redroid
