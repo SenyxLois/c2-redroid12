@@ -30,6 +30,22 @@ namespace media {
 namespace c2 {
 namespace redroid {
 
+struct VaapiFrameStats {
+    uint64_t vpp_us = 0;
+    uint64_t enc_submit_us = 0;
+    uint64_t enc_sync_us = 0;
+    uint64_t map_copy_us = 0;
+    uint64_t cache_hits = 0;
+    uint64_t cache_misses = 0;
+    uint64_t last_ino = 0;
+    uint64_t last_modifier = 0;
+    uint32_t last_fourcc = 0;
+    uint32_t entrypoint = 0;
+    bool using_cqp = false;
+    uint32_t active_qp = 26;
+    bool last_cache_hit = false;
+};
+
 class VaapiWrapper {
 public:
     using OutputBufferAllocator = std::function<void *(size_t exact_size)>;
@@ -61,6 +77,7 @@ public:
 
     const VaapiEncoderConfig &GetConfig() const { return mConfig; }
     int GetDrmFd() const { return mDrmFd; }
+    VaapiFrameStats GetFrameStats() const;
 
 private:
     explicit VaapiWrapper(const VaapiEncoderConfig &config);
@@ -118,7 +135,21 @@ private:
     bool mBitrateNeedsUpdate = false;
     bool mUsingCqp = false;
     uint32_t mActiveQp = 26;
-    std::mutex mLock;
+    uint32_t mBaseQp = 26;
+    uint64_t mRcWindowBytes = 0;
+    uint32_t mRcWindowFrames = 0;
+    uint32_t mEntrypoint = 0;
+    uint64_t mCacheHits = 0;
+    uint64_t mCacheMisses = 0;
+    uint64_t mLastIno = 0;
+    uint64_t mLastModifier = 0;
+    uint32_t mLastFourcc = 0;
+    bool mLastCacheHit = false;
+    uint64_t mLastVppUs = 0;
+    uint64_t mLastEncSubmitUs = 0;
+    uint64_t mLastEncSyncUs = 0;
+    uint64_t mLastMapCopyUs = 0;
+    mutable std::mutex mLock;
 };
 
 } // namespace redroid
