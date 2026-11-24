@@ -150,10 +150,17 @@ public:
     virtual c2_status_t fetchLinearBlock(
             uint32_t capacity,
             C2MemoryUsage usage,
-            std::shared_ptr<C2LinearBlock>* block) {
+            std::shared_ptr<C2LinearBlock>* block) override {
         c2_status_t status;
+        uint32_t spins = 0;
         do {
             status = mBase->fetchLinearBlock(capacity, usage, block);
+            if (status == C2_BLOCKING) {
+                if (++spins > 64) {
+                    return C2_TIMED_OUT;
+                }
+                usleep(250);
+            }
         } while (status == C2_BLOCKING);
         return status;
     }
@@ -161,10 +168,17 @@ public:
     virtual c2_status_t fetchCircularBlock(
             uint32_t capacity,
             C2MemoryUsage usage,
-            std::shared_ptr<C2CircularBlock>* block) {
+            std::shared_ptr<C2CircularBlock>* block) override {
         c2_status_t status;
+        uint32_t spins = 0;
         do {
             status = mBase->fetchCircularBlock(capacity, usage, block);
+            if (status == C2_BLOCKING) {
+                if (++spins > 64) {
+                    return C2_TIMED_OUT;
+                }
+                usleep(250);
+            }
         } while (status == C2_BLOCKING);
         return status;
     }
@@ -172,11 +186,18 @@ public:
     virtual c2_status_t fetchGraphicBlock(
             uint32_t width, uint32_t height, uint32_t format,
             C2MemoryUsage usage,
-            std::shared_ptr<C2GraphicBlock>* block) {
+            std::shared_ptr<C2GraphicBlock>* block) override {
         c2_status_t status;
+        uint32_t spins = 0;
         do {
             status = mBase->fetchGraphicBlock(width, height, format, usage,
                                               block);
+            if (status == C2_BLOCKING) {
+                if (++spins > 64) {
+                    return C2_TIMED_OUT;
+                }
+                usleep(250);
+            }
         } while (status == C2_BLOCKING);
         return status;
     }
