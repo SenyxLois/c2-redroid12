@@ -18,6 +18,7 @@
 #define LOG_TAG "C2RedroidVaapi"
 
 #include "vaapi_wrapper.h"
+#include <algorithm>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -29,6 +30,9 @@
 #include <va/va_drmcommon.h>
 #include <va/va_vpp.h>
 #include <drm/drm_fourcc.h>
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
 
 namespace android {
 namespace hardware {
@@ -333,9 +337,71 @@ void GenerateHevcSequenceHeaders(uint32_t width, uint32_t height, uint32_t fps, 
     AppendHevcNal(out, 34, pps.flushRbsp());
 }
 
-void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t> &out) {
-    out.clear();
-    BitWriter sw;
+uint32_t ComputeTargetQp(uint32_t bit_rate, uint32_t width, uint32_t height, uint32_t fps) {
+    double pixels_per_sec = static_cast<double>(width) * static_cast<double>(height) *
+                            static_cast<double>(fps > 0 ? fps : 60);
+    if (pixels_per_sec <= 0.0) return 26;
+    double bpp = static_cast<double>(bit_rate) / pixels_per_sec;
+    if (bpp >= 0.25) return 22;
+    if (bpp >= 0.14) return 25;
+    if (bpp >= 0.07) return 28;
+    if (bpp >= 0.035) return 31;
+    return 34;
+}
+
+class StackBitWriter {
+public:
+    void writeBits(uint32_t val, int numBits) {
+        for (int i = numBits - 1; i >= 0; --i) writeBit((val >> i) & 1u);
+    }
+    void writeBit(uint32_t bit) {
+        mCurByte = static_cast<uint8_t>((mCurByte << 1) | (bit & 1u));
+        if (++mBitIndex == 8) {
+            if (mLen < sizeof(mRaw)) mRaw[mLen++] = mCurByte;
+            mCurByte = 0;
+            mBitIndex = 0;
+        }
+    }
+    void writeUe(uint32_t val) {
+        if (val == 0) { writeBit(1); return; }
+        uint32_t temp = val + 1;
+        int len = 0;
+        while (temp > 0) { temp >>= 1; len++; }
+        for (int i = 0; i < len - 1; ++i) writeBit(0);
+        writeBits(val + 1, len);
+    }
+    void writeSe(int32_t val) {
+        if (val <= 0) writeUe(static_cast<uint32_t>(-val * 2));
+        else writeUe(static_cast<uint32_t>(val * 2 - 1));
+    }
+    size_t finishHevcNal(uint8_t nal_unit_type, uint8_t (&out)[64]) {
+        writeBit(1); // rbsp_stop_one_bit
+        while (mBitIndex != 0) writeBit(0);
+        out[0] = 0x00; out[1] = 0x00; out[2] = 0x00; out[3] = 0x01;
+        out[4] = static_cast<uint8_t>((nal_unit_type << 1) & 0x7E);
+        out[5] = 0x01;
+        size_t pos = 6;
+        int zeroCount = 0;
+        for (size_t i = 0; i < mLen && pos + 2 < sizeof(out); ++i) {
+            uint8_t b = mRaw[i];
+            if (zeroCount == 2 && b <= 3) {
+                out[pos++] = 0x03;
+                zeroCount = 0;
+            }
+            out[pos++] = b;
+            zeroCount = (b == 0) ? (zeroCount + 1) : 0;
+        }
+        return pos;
+    }
+private:
+    uint8_t mRaw[48]{};
+    size_t mLen = 0;
+    uint8_t mCurByte = 0;
+    int mBitIndex = 0;
+};
+
+size_t GenerateHevcSliceHeaderStack(bool is_keyframe, uint32_t poc, int32_t slice_qp_delta, uint8_t (&out)[64]) {
+    StackBitWriter sw;
     sw.writeBit(1);           // first_slice_segment_in_pic_flag = 1
     if (is_keyframe) {
         sw.writeBit(0);       // no_output_of_prior_pics_flag = 0
@@ -345,14 +411,13 @@ void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t
         sw.writeUe(2);        // slice_type = 2 (I)
         sw.writeBit(1);       // slice_sao_luma_flag = 1
         sw.writeBit(1);       // slice_sao_chroma_flag = 1
-        sw.writeSe(0);        // slice_qp_delta = 0
+        sw.writeSe(slice_qp_delta);
         sw.writeBit(0);       // slice_loop_filter_across_slices_enabled_flag = 0
-        AppendHevcNal(out, 19, sw.flushRbsp()); // IDR_W_RADL = 19
+        return sw.finishHevcNal(19, out); // IDR_W_RADL = 19
     } else {
         sw.writeUe(0);        // slice_type = 0 (GPB B-slice)
-        sw.writeBits(poc & 0xFFF, 12); // slice_pic_order_cnt_lsb (12 bits)
+        sw.writeBits(poc & 0xFFF, 12);
         sw.writeBit(0);       // short_term_ref_pic_set_sps_flag = 0
-        // st_ref_pic_set(0): 1 negative pic with delta_poc = -1
         sw.writeUe(1);        // num_negative_pics = 1
         sw.writeUe(0);        // num_positive_pics = 0
         sw.writeUe(0);        // delta_poc_s0_minus1[0] = 0
@@ -364,10 +429,52 @@ void GenerateHevcSliceHeader(bool is_keyframe, uint32_t poc, std::vector<uint8_t
         sw.writeBit(0);       // mvd_l1_zero_flag = 0
         sw.writeBit(1);       // collocated_from_l0_flag = 1
         sw.writeUe(0);        // five_minus_max_num_merge_cand = 0
-        sw.writeSe(0);        // slice_qp_delta = 0
+        sw.writeSe(slice_qp_delta);
         sw.writeBit(0);       // slice_loop_filter_across_slices_enabled_flag = 0
-        AppendHevcNal(out, 1, sw.flushRbsp());  // TRAIL_R = 1
+        return sw.finishHevcNal(1, out);  // TRAIL_R = 1
     }
+}
+
+inline void CopyFromCodedBuffer(uint8_t *dst, const void *src, size_t size) {
+#if defined(__SSE4_1__)
+    if (size >= 128) {
+        const uint8_t *s = static_cast<const uint8_t *>(src);
+        uintptr_t misalign = reinterpret_cast<uintptr_t>(s) & 15u;
+        if (misalign != 0) {
+            size_t head = 16u - misalign;
+            memcpy(dst, s, head);
+            dst += head;
+            s += head;
+            size -= head;
+        }
+        _mm_mfence();
+        while (size >= 64) {
+            __m128i r0 = _mm_stream_load_si128(reinterpret_cast<const __m128i *>(s));
+            __m128i r1 = _mm_stream_load_si128(reinterpret_cast<const __m128i *>(s + 16));
+            __m128i r2 = _mm_stream_load_si128(reinterpret_cast<const __m128i *>(s + 32));
+            __m128i r3 = _mm_stream_load_si128(reinterpret_cast<const __m128i *>(s + 48));
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), r0);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 16), r1);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 32), r2);
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 48), r3);
+            s += 64;
+            dst += 64;
+            size -= 64;
+        }
+        while (size >= 16) {
+            __m128i r0 = _mm_stream_load_si128(reinterpret_cast<const __m128i *>(s));
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), r0);
+            s += 16;
+            dst += 16;
+            size -= 16;
+        }
+        if (size > 0) {
+            memcpy(dst, s, size);
+        }
+        return;
+    }
+#endif
+    memcpy(dst, src, size);
 }
 
 } // anonymous namespace
@@ -489,8 +596,22 @@ void VaapiWrapper::Deinitialize() {
 bool VaapiWrapper::InitVpp() {
     if (!mVaDisplay) return false;
 
-    VAStatus status = vaCreateConfig(mVaDisplay, VAProfileNone, VAEntrypointVideoProc,
-                                     nullptr, 0, &mVppConfigId);
+    VASurfaceAttrib attr{};
+    attr.type = VASurfaceAttribPixelFormat;
+    attr.flags = VA_SURFACE_ATTRIB_SETTABLE;
+    attr.value.type = VAGenericValueTypeInteger;
+    attr.value.value.i = VA_FOURCC_NV12;
+
+    VAStatus status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
+                                       mConfig.width, mConfig.height,
+                                       mReconSurfaces, 2, &attr, 1);
+    if (status != VA_STATUS_SUCCESS) {
+        ALOGE("vaCreateSurfaces for recon DPB surfaces failed: %s", vaErrorStr(status));
+        return false;
+    }
+
+    status = vaCreateConfig(mVaDisplay, VAProfileNone, VAEntrypointVideoProc,
+                            nullptr, 0, &mVppConfigId);
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaCreateConfig for VPP failed: %s", vaErrorStr(status));
         return false;
@@ -503,12 +624,6 @@ bool VaapiWrapper::InitVpp() {
         return false;
     }
 
-    VASurfaceAttrib attr{};
-    attr.type = VASurfaceAttribPixelFormat;
-    attr.flags = VA_SURFACE_ATTRIB_SETTABLE;
-    attr.value.type = VAGenericValueTypeInteger;
-    attr.value.value.i = VA_FOURCC_NV12;
-
     status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
                               mConfig.width, mConfig.height,
                               &mNv12Surface, 1, &attr, 1);
@@ -517,14 +632,7 @@ bool VaapiWrapper::InitVpp() {
         return false;
     }
 
-    status = vaCreateSurfaces(mVaDisplay, VA_RT_FORMAT_YUV420,
-                              mConfig.width, mConfig.height,
-                              mReconSurfaces, 2, &attr, 1);
-    if (status != VA_STATUS_SUCCESS) {
-        ALOGW("vaCreateSurfaces for recon DPB surfaces failed: %s", vaErrorStr(status));
-    }
-
-    ALOGI("VA-API VPP & DPB initialized: NV12 %d, Recon [%d, %d]",
+    ALOGI("VA-API VEBOX VPP & DPB initialized: NV12 %d, Recon [%d, %d]",
           mNv12Surface, mReconSurfaces[0], mReconSurfaces[1]);
     return true;
 }
@@ -586,13 +694,42 @@ bool VaapiWrapper::CreateEncoderContext() {
     VAProfile profile = (mConfig.codec == CodecType::HEVC) ? VAProfileHEVCMain : VAProfileH264Main;
     VAEntrypoint entrypoint = VAEntrypointEncSlice;
 
+    mUsingCqp = false;
+    mBaseQp = ComputeTargetQp(mConfig.bit_rate, mConfig.width, mConfig.height, mConfig.frame_rate);
+    mActiveQp = mBaseQp;
+    mRcWindowBytes = 0;
+    mRcWindowFrames = 0;
+
+    uint32_t rt_format = VA_RT_FORMAT_YUV420;
+    uint32_t rc_mode = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+
+    // Probe Intel Low-Power VDEnc (VAEntrypointEncSliceLP) to keep 3D Render engine at 0%
+    VAConfigAttrib lp_attribs[2]{};
+    lp_attribs[0].type = VAConfigAttribRTFormat;
+    lp_attribs[1].type = VAConfigAttribRateControl;
+    if (vaGetConfigAttributes(mVaDisplay, profile, VAEntrypointEncSliceLP, lp_attribs, 2) == VA_STATUS_SUCCESS &&
+        lp_attribs[0].value != VA_ATTRIB_NOT_SUPPORTED &&
+        lp_attribs[1].value != VA_ATTRIB_NOT_SUPPORTED) {
+        entrypoint = VAEntrypointEncSliceLP;
+        if (lp_attribs[1].value & rc_mode) {
+            // HuC firmware loaded: CBR/VBR supported on VDEnc
+        } else if (lp_attribs[1].value & VA_RC_CBR) {
+            rc_mode = VA_RC_CBR;
+        } else if (lp_attribs[1].value & VA_RC_VBR) {
+            rc_mode = VA_RC_VBR;
+        } else if (lp_attribs[1].value & VA_RC_CQP) {
+            rc_mode = VA_RC_CQP;
+            mUsingCqp = true;
+        }
+    }
+
     VAConfigAttrib attribs[3]{};
     int num_attribs = 2;
     attribs[0].type = VAConfigAttribRTFormat;
-    attribs[0].value = VA_RT_FORMAT_YUV420;
+    attribs[0].value = rt_format;
 
     attribs[1].type = VAConfigAttribRateControl;
-    attribs[1].value = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+    attribs[1].value = rc_mode;
 
     if (mConfig.codec == CodecType::HEVC) {
         attribs[2].type = VAConfigAttribEncPackedHeaders;
@@ -601,6 +738,14 @@ bool VaapiWrapper::CreateEncoderContext() {
     }
 
     VAStatus status = vaCreateConfig(mVaDisplay, profile, entrypoint, attribs, num_attribs, &mVaConfigId);
+    if (status != VA_STATUS_SUCCESS && entrypoint == VAEntrypointEncSliceLP) {
+        ALOGW("VAEntrypointEncSliceLP config failed (%s), falling back to VAEntrypointEncSlice", vaErrorStr(status));
+        entrypoint = VAEntrypointEncSlice;
+        mUsingCqp = false;
+        attribs[0].value = VA_RT_FORMAT_YUV420;
+        attribs[1].value = (mConfig.rc_mode == RateControlMode::CBR) ? VA_RC_CBR : VA_RC_VBR;
+        status = vaCreateConfig(mVaDisplay, profile, entrypoint, attribs, num_attribs, &mVaConfigId);
+    }
     if (status != VA_STATUS_SUCCESS) {
         ALOGE("vaCreateConfig failed for profile %d: %s", profile, vaErrorStr(status));
         return false;
@@ -622,48 +767,39 @@ bool VaapiWrapper::CreateEncoderContext() {
         return false;
     }
 
+    mRateControlInitialized = false;
     mBitrateNeedsUpdate = true;
-    ALOGI("VA-API encoder context ready: %ux%u @ %ufps, target bitrate: %u bps",
+    ALOGI("VA-API encoder context ready (ep=%d, cqp=%d, qp=%u): %ux%u @ %ufps, %u bps",
+          entrypoint, mUsingCqp, mActiveQp,
           mConfig.width, mConfig.height, mConfig.frame_rate, mConfig.bit_rate);
     return true;
 }
 
-bool VaapiWrapper::SetupRateControl() {
-    // 0. Target Usage / Quality Level = 7 (Fastest / Low-Latency streaming preset)
-    uint8_t qbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterBufferQualityLevel)]{};
-    auto *misc_q = reinterpret_cast<VAEncMiscParameterBuffer *>(qbuf);
-    misc_q->type = VAEncMiscParameterTypeQualityLevel;
-    auto *q_param = reinterpret_cast<VAEncMiscParameterBufferQualityLevel *>(misc_q->data);
-    q_param->quality_level = 7;
-    VABufferID q_buf_id = VA_INVALID_ID;
-    if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
-                       sizeof(qbuf), 1, qbuf, &q_buf_id) == VA_STATUS_SUCCESS) {
-        vaRenderPicture(mVaDisplay, mVaContextId, &q_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, q_buf_id);
+bool VaapiWrapper::AppendRateControlBuffers(bool reset_brc, VABufferID *bufs, int *num_bufs) {
+    if (!mRateControlInitialized) {
+        // 0. Target Usage / Quality Level = 7 (Fastest / Low-Latency VDEnc streaming preset) - send once at init
+        alignas(8) uint8_t qbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterBufferQualityLevel)]{};
+        auto *misc_q = reinterpret_cast<VAEncMiscParameterBuffer *>(qbuf);
+        misc_q->type = VAEncMiscParameterTypeQualityLevel;
+        auto *q_param = reinterpret_cast<VAEncMiscParameterBufferQualityLevel *>(misc_q->data);
+        q_param->quality_level = 7;
+        VABufferID q_buf_id = VA_INVALID_ID;
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
+                           sizeof(qbuf), 1, qbuf, &q_buf_id) == VA_STATUS_SUCCESS && q_buf_id != VA_INVALID_ID) {
+            bufs[(*num_bufs)++] = q_buf_id;
+        }
     }
 
-    // 1. Rate control parameter
-    VAEncMiscParameterBuffer *misc_param = nullptr;
-    VAEncMiscParameterRateControl *rc_param = nullptr;
-    VABufferID rc_buf_id = VA_INVALID_ID;
-
-    unsigned int total_size = sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterRateControl);
-    VAStatus status = vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
-                                     total_size, 1, nullptr, &rc_buf_id);
-    if (status != VA_STATUS_SUCCESS) {
-        return false;
+    if (mUsingCqp) {
+        mRateControlInitialized = true;
+        return true;
     }
 
-    vaMapBuffer(mVaDisplay, rc_buf_id, (void **)&misc_param);
-    if (!misc_param) {
-        vaDestroyBuffer(mVaDisplay, rc_buf_id);
-        return false;
-    }
-
-    misc_param->type = VAEncMiscParameterTypeRateControl;
-    rc_param = (VAEncMiscParameterRateControl *)misc_param->data;
-    memset(rc_param, 0, sizeof(*rc_param));
-
+    // 1. Rate control parameter (stack-initialized, zero vaMapBuffer roundtrip)
+    alignas(8) uint8_t rcbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterRateControl)]{};
+    auto *misc_rc = reinterpret_cast<VAEncMiscParameterBuffer *>(rcbuf);
+    misc_rc->type = VAEncMiscParameterTypeRateControl;
+    auto *rc_param = reinterpret_cast<VAEncMiscParameterRateControl *>(misc_rc->data);
     rc_param->bits_per_second = mConfig.bit_rate;
     rc_param->target_percentage = (mConfig.rc_mode == RateControlMode::CBR) ? 100 : 95;
     rc_param->window_size = 500;  // 500ms sliding window keeps bit spikes in check without lag
@@ -671,57 +807,45 @@ bool VaapiWrapper::SetupRateControl() {
     rc_param->min_qp = mConfig.min_qp;
     rc_param->max_qp = mConfig.max_qp;
     rc_param->basic_unit_size = 0;
-    rc_param->rc_flags.bits.reset = 1;
+    rc_param->rc_flags.bits.reset = reset_brc ? 1 : 0;
     rc_param->rc_flags.bits.disable_frame_skip = 1;
 
-    vaUnmapBuffer(mVaDisplay, rc_buf_id);
-    vaRenderPicture(mVaDisplay, mVaContextId, &rc_buf_id, 1);
-    vaDestroyBuffer(mVaDisplay, rc_buf_id);
+    VABufferID rc_buf_id = VA_INVALID_ID;
+    if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
+                       sizeof(rcbuf), 1, rcbuf, &rc_buf_id) != VA_STATUS_SUCCESS || rc_buf_id == VA_INVALID_ID) {
+        return false;
+    }
+    bufs[(*num_bufs)++] = rc_buf_id;
 
-    // 2. HRD (Hypothetical Reference Decoder) parameter - prevents buffer overflow/underrun QP spikes
-    VAEncMiscParameterBuffer *misc_hrd = nullptr;
-    VAEncMiscParameterHRD *hrd_param = nullptr;
+    // 2. HRD parameter
+    alignas(8) uint8_t hrdbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterHRD)]{};
+    auto *misc_hrd = reinterpret_cast<VAEncMiscParameterBuffer *>(hrdbuf);
+    misc_hrd->type = VAEncMiscParameterTypeHRD;
+    auto *hrd_param = reinterpret_cast<VAEncMiscParameterHRD *>(misc_hrd->data);
+    hrd_param->buffer_size = mConfig.bit_rate * 2;
+    hrd_param->initial_buffer_fullness = mConfig.bit_rate;
+
     VABufferID hrd_buf_id = VA_INVALID_ID;
-
-    unsigned int hrd_size = sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterHRD);
-    status = vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
-                            hrd_size, 1, nullptr, &hrd_buf_id);
-    if (status == VA_STATUS_SUCCESS) {
-        vaMapBuffer(mVaDisplay, hrd_buf_id, (void **)&misc_hrd);
-        if (misc_hrd) {
-            misc_hrd->type = VAEncMiscParameterTypeHRD;
-            hrd_param = (VAEncMiscParameterHRD *)misc_hrd->data;
-            memset(hrd_param, 0, sizeof(*hrd_param));
-            hrd_param->buffer_size = mConfig.bit_rate * 2;
-            hrd_param->initial_buffer_fullness = mConfig.bit_rate;
-            vaUnmapBuffer(mVaDisplay, hrd_buf_id);
-            vaRenderPicture(mVaDisplay, mVaContextId, &hrd_buf_id, 1);
-        }
-        vaDestroyBuffer(mVaDisplay, hrd_buf_id);
+    if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
+                       sizeof(hrdbuf), 1, hrdbuf, &hrd_buf_id) == VA_STATUS_SUCCESS && hrd_buf_id != VA_INVALID_ID) {
+        bufs[(*num_bufs)++] = hrd_buf_id;
     }
 
     // 3. Frame rate parameter
-    VAEncMiscParameterBuffer *misc_fps = nullptr;
-    VAEncMiscParameterFrameRate *fps_param = nullptr;
-    VABufferID fps_buf_id = VA_INVALID_ID;
+    alignas(8) uint8_t fpsbuf[sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterFrameRate)]{};
+    auto *misc_fps = reinterpret_cast<VAEncMiscParameterBuffer *>(fpsbuf);
+    misc_fps->type = VAEncMiscParameterTypeFrameRate;
+    auto *fps_param = reinterpret_cast<VAEncMiscParameterFrameRate *>(misc_fps->data);
+    uint32_t fps = mConfig.frame_rate > 0 ? mConfig.frame_rate : 60;
+    fps_param->framerate = (1u << 16) | (fps & 0xFFFF);
 
-    unsigned int fps_size = sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParameterFrameRate);
-    status = vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
-                            fps_size, 1, nullptr, &fps_buf_id);
-    if (status == VA_STATUS_SUCCESS) {
-        vaMapBuffer(mVaDisplay, fps_buf_id, (void **)&misc_fps);
-        if (misc_fps) {
-            misc_fps->type = VAEncMiscParameterTypeFrameRate;
-            fps_param = (VAEncMiscParameterFrameRate *)misc_fps->data;
-            memset(fps_param, 0, sizeof(*fps_param));
-            uint32_t fps = mConfig.frame_rate > 0 ? mConfig.frame_rate : 60;
-            fps_param->framerate = (1u << 16) | (fps & 0xFFFF);
-            vaUnmapBuffer(mVaDisplay, fps_buf_id);
-            vaRenderPicture(mVaDisplay, mVaContextId, &fps_buf_id, 1);
-        }
-        vaDestroyBuffer(mVaDisplay, fps_buf_id);
+    VABufferID fps_buf_id = VA_INVALID_ID;
+    if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncMiscParameterBufferType,
+                       sizeof(fpsbuf), 1, fpsbuf, &fps_buf_id) == VA_STATUS_SUCCESS && fps_buf_id != VA_INVALID_ID) {
+        bufs[(*num_bufs)++] = fps_buf_id;
     }
 
+    mRateControlInitialized = true;
     return true;
 }
 
@@ -892,7 +1016,7 @@ void VaapiWrapper::DestroySurface(VASurfaceID surface_id) {
     vaDestroySurfaces(mVaDisplay, &surface_id, 1);
 }
 
-bool VaapiWrapper::RenderSequenceParameters() {
+bool VaapiWrapper::AppendSequenceBuffer(VABufferID *bufs, int *num_bufs) {
     if (mConfig.codec == CodecType::H264) {
         VAEncSequenceParameterBufferH264 seq_param{};
         seq_param.seq_parameter_set_id = 0;
@@ -912,10 +1036,11 @@ bool VaapiWrapper::RenderSequenceParameters() {
         seq_param.seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 = 0;
 
         VABufferID seq_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSequenceParameterBufferType,
-                       sizeof(seq_param), 1, &seq_param, &seq_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &seq_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, seq_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSequenceParameterBufferType,
+                           sizeof(seq_param), 1, &seq_param, &seq_buf_id) != VA_STATUS_SUCCESS || seq_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = seq_buf_id;
     } else if (mConfig.codec == CodecType::HEVC) {
         VAEncSequenceParameterBufferHEVC seq_param{};
         seq_param.general_profile_idc = 1; // Profile Main
@@ -948,23 +1073,24 @@ bool VaapiWrapper::RenderSequenceParameters() {
         seq_param.max_transform_hierarchy_depth_intra = 2;
 
         VABufferID seq_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSequenceParameterBufferType,
-                       sizeof(seq_param), 1, &seq_param, &seq_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &seq_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, seq_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSequenceParameterBufferType,
+                           sizeof(seq_param), 1, &seq_param, &seq_buf_id) != VA_STATUS_SUCCESS || seq_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = seq_buf_id;
     }
     return true;
 }
 
-bool VaapiWrapper::RenderPictureParameters(VASurfaceID surface, bool is_keyframe) {
+bool VaapiWrapper::AppendPictureBuffer(VASurfaceID surface, bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs) {
     if (mConfig.codec == CodecType::H264) {
         VAEncPictureParameterBufferH264 pic_param{};
         pic_param.CurrPic.picture_id = (mReconSurfaces[mCurrentRecon] != VA_INVALID_SURFACE)
                                         ? mReconSurfaces[mCurrentRecon] : surface;
-        pic_param.CurrPic.frame_idx = is_keyframe ? 0 : (mFrameIndex % 16);
+        pic_param.CurrPic.frame_idx = is_keyframe ? 0 : (poc % 16);
         pic_param.CurrPic.flags = VA_PICTURE_H264_SHORT_TERM_REFERENCE;
-        pic_param.CurrPic.TopFieldOrderCnt = is_keyframe ? 0 : (mFrameIndex % 16) * 2;
-        pic_param.CurrPic.BottomFieldOrderCnt = is_keyframe ? 0 : (mFrameIndex % 16) * 2;
+        pic_param.CurrPic.TopFieldOrderCnt = is_keyframe ? 0 : (poc % 16) * 2;
+        pic_param.CurrPic.BottomFieldOrderCnt = is_keyframe ? 0 : (poc % 16) * 2;
         pic_param.coded_buf = mCodedBuf;
         pic_param.pic_fields.bits.idr_pic_flag = is_keyframe ? 1 : 0;
         pic_param.pic_fields.bits.reference_pic_flag = 1;
@@ -981,21 +1107,22 @@ bool VaapiWrapper::RenderPictureParameters(VASurfaceID surface, bool is_keyframe
         if (!is_keyframe && mHasReference && mReconSurfaces[mPrevRecon] != VA_INVALID_SURFACE) {
             pic_param.ReferenceFrames[0].picture_id = mReconSurfaces[mPrevRecon];
             pic_param.ReferenceFrames[0].flags = VA_PICTURE_H264_SHORT_TERM_REFERENCE;
-            pic_param.ReferenceFrames[0].frame_idx = (mFrameIndex - 1) % 16;
-            pic_param.ReferenceFrames[0].TopFieldOrderCnt = ((mFrameIndex - 1) % 16) * 2;
-            pic_param.ReferenceFrames[0].BottomFieldOrderCnt = ((mFrameIndex - 1) % 16) * 2;
+            pic_param.ReferenceFrames[0].frame_idx = (poc - 1) % 16;
+            pic_param.ReferenceFrames[0].TopFieldOrderCnt = ((poc - 1) % 16) * 2;
+            pic_param.ReferenceFrames[0].BottomFieldOrderCnt = ((poc - 1) % 16) * 2;
         }
 
         VABufferID pic_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPictureParameterBufferType,
-                       sizeof(pic_param), 1, &pic_param, &pic_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &pic_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, pic_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPictureParameterBufferType,
+                           sizeof(pic_param), 1, &pic_param, &pic_buf_id) != VA_STATUS_SUCCESS || pic_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = pic_buf_id;
     } else if (mConfig.codec == CodecType::HEVC) {
         VAEncPictureParameterBufferHEVC pic_param{};
         pic_param.decoded_curr_pic.picture_id = (mReconSurfaces[mCurrentRecon] != VA_INVALID_SURFACE)
                                                 ? mReconSurfaces[mCurrentRecon] : surface;
-        pic_param.decoded_curr_pic.pic_order_cnt = mFrameIndex;
+        pic_param.decoded_curr_pic.pic_order_cnt = poc;
         pic_param.decoded_curr_pic.flags = 0;
 
         for (int i = 0; i < 15; i++) {
@@ -1005,7 +1132,7 @@ bool VaapiWrapper::RenderPictureParameters(VASurfaceID surface, bool is_keyframe
 
         if (!is_keyframe && mHasReference && mReconSurfaces[mPrevRecon] != VA_INVALID_SURFACE) {
             pic_param.reference_frames[0].picture_id = mReconSurfaces[mPrevRecon];
-            pic_param.reference_frames[0].pic_order_cnt = mFrameIndex - 1;
+            pic_param.reference_frames[0].pic_order_cnt = poc - 1;
             pic_param.reference_frames[0].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
         }
 
@@ -1023,15 +1150,16 @@ bool VaapiWrapper::RenderPictureParameters(VASurfaceID surface, bool is_keyframe
         pic_param.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = 1;
 
         VABufferID pic_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPictureParameterBufferType,
-                       sizeof(pic_param), 1, &pic_param, &pic_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &pic_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, pic_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPictureParameterBufferType,
+                           sizeof(pic_param), 1, &pic_param, &pic_buf_id) != VA_STATUS_SUCCESS || pic_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = pic_buf_id;
     }
     return true;
 }
 
-bool VaapiWrapper::RenderPackedHeaders(bool is_keyframe) {
+bool VaapiWrapper::AppendPackedHeaderBuffers(bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs) {
     if (mConfig.codec != CodecType::HEVC) {
         return true;
     }
@@ -1039,48 +1167,54 @@ bool VaapiWrapper::RenderPackedHeaders(bool is_keyframe) {
     if (is_keyframe && !mCachedSeqHeaders.empty()) {
         VAEncPackedHeaderParameterBuffer ph{};
         ph.type = VAEncPackedHeaderSequence;
-        ph.bit_length = mCachedSeqHeaders.size() * 8;
+        ph.bit_length = static_cast<uint32_t>(mCachedSeqHeaders.size() * 8);
         ph.has_emulation_bytes = 1;
 
-        VABufferID ph_bufs[2] = {VA_INVALID_ID, VA_INVALID_ID};
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderParameterBufferType,
-                       sizeof(ph), 1, &ph, &ph_bufs[0]);
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderDataBufferType,
-                       mCachedSeqHeaders.size(), 1, mCachedSeqHeaders.data(), &ph_bufs[1]);
-        vaRenderPicture(mVaDisplay, mVaContextId, ph_bufs, 2);
-        vaDestroyBuffer(mVaDisplay, ph_bufs[0]);
-        vaDestroyBuffer(mVaDisplay, ph_bufs[1]);
+        VABufferID ph_param = VA_INVALID_ID, ph_data = VA_INVALID_ID;
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderParameterBufferType,
+                           sizeof(ph), 1, &ph, &ph_param) == VA_STATUS_SUCCESS &&
+            vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderDataBufferType,
+                           mCachedSeqHeaders.size(), 1, mCachedSeqHeaders.data(), &ph_data) == VA_STATUS_SUCCESS) {
+            bufs[(*num_bufs)++] = ph_param;
+            bufs[(*num_bufs)++] = ph_data;
+        }
     }
 
-    std::vector<uint8_t> slice_hdr;
-    GenerateHevcSliceHeader(is_keyframe, mFrameIndex, slice_hdr);
+    uint8_t slice_hdr[64];
+    int32_t qp_delta = mUsingCqp ? (static_cast<int32_t>(mActiveQp) - 30) : 0;
+    size_t slice_hdr_len = GenerateHevcSliceHeaderStack(is_keyframe, poc, qp_delta, slice_hdr);
 
     VAEncPackedHeaderParameterBuffer sh{};
     sh.type = VAEncPackedHeaderSlice;
-    sh.bit_length = slice_hdr.size() * 8;
+    sh.bit_length = static_cast<uint32_t>(slice_hdr_len * 8);
     sh.has_emulation_bytes = 1;
 
-    VABufferID sh_bufs[2] = {VA_INVALID_ID, VA_INVALID_ID};
-    vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderParameterBufferType,
-                   sizeof(sh), 1, &sh, &sh_bufs[0]);
-    vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderDataBufferType,
-                   slice_hdr.size(), 1, slice_hdr.data(), &sh_bufs[1]);
-    vaRenderPicture(mVaDisplay, mVaContextId, sh_bufs, 2);
-    vaDestroyBuffer(mVaDisplay, sh_bufs[0]);
-    vaDestroyBuffer(mVaDisplay, sh_bufs[1]);
-
+    VABufferID sh_param = VA_INVALID_ID, sh_data = VA_INVALID_ID;
+    if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderParameterBufferType,
+                       sizeof(sh), 1, &sh, &sh_param) != VA_STATUS_SUCCESS ||
+        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncPackedHeaderDataBufferType,
+                       slice_hdr_len, 1, slice_hdr, &sh_data) != VA_STATUS_SUCCESS) {
+        if (sh_param != VA_INVALID_ID) vaDestroyBuffer(mVaDisplay, sh_param);
+        return false;
+    }
+    bufs[(*num_bufs)++] = sh_param;
+    bufs[(*num_bufs)++] = sh_data;
     return true;
 }
 
-bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) {
+bool VaapiWrapper::AppendSliceBuffer(VASurfaceID surface, bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs) {
+    (void)surface;
     if (mConfig.codec == CodecType::H264) {
         VAEncSliceParameterBufferH264 slice_param{};
         slice_param.macroblock_address = 0;
         slice_param.num_macroblocks = ((mConfig.width + 15) / 16) * ((mConfig.height + 15) / 16);
         slice_param.macroblock_info = VA_INVALID_ID;
         slice_param.slice_type = is_keyframe ? 2 : 0;  // 2 = I-slice, 0 = P-slice in vaapi
-        slice_param.pic_order_cnt_lsb = is_keyframe ? 0 : (mFrameIndex % 16) * 2;
+        slice_param.pic_order_cnt_lsb = is_keyframe ? 0 : (poc % 16) * 2;
         slice_param.idr_pic_id = 0;
+        if (mUsingCqp) {
+            slice_param.slice_qp_delta = static_cast<int8_t>(static_cast<int32_t>(mActiveQp) - 26);
+        }
 
         for (int i = 0; i < 32; i++) {
             slice_param.RefPicList0[i].picture_id = VA_INVALID_SURFACE;
@@ -1094,16 +1228,17 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
             slice_param.num_ref_idx_l0_active_minus1 = 0;
             slice_param.RefPicList0[0].picture_id = mReconSurfaces[mPrevRecon];
             slice_param.RefPicList0[0].flags = VA_PICTURE_H264_SHORT_TERM_REFERENCE;
-            slice_param.RefPicList0[0].frame_idx = (mFrameIndex - 1) % 16;
-            slice_param.RefPicList0[0].TopFieldOrderCnt = ((mFrameIndex - 1) % 16) * 2;
-            slice_param.RefPicList0[0].BottomFieldOrderCnt = ((mFrameIndex - 1) % 16) * 2;
+            slice_param.RefPicList0[0].frame_idx = (poc - 1) % 16;
+            slice_param.RefPicList0[0].TopFieldOrderCnt = ((poc - 1) % 16) * 2;
+            slice_param.RefPicList0[0].BottomFieldOrderCnt = ((poc - 1) % 16) * 2;
         }
 
         VABufferID slice_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSliceParameterBufferType,
-                       sizeof(slice_param), 1, &slice_param, &slice_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &slice_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, slice_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSliceParameterBufferType,
+                           sizeof(slice_param), 1, &slice_param, &slice_buf_id) != VA_STATUS_SUCCESS || slice_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = slice_buf_id;
     } else if (mConfig.codec == CodecType::HEVC) {
         VAEncSliceParameterBufferHEVC slice_param{};
         slice_param.slice_segment_address = 0;
@@ -1116,6 +1251,9 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
         slice_param.slice_type = is_keyframe ? 2 : 0; // 2: I-slice, 0: GPB B-slice (required by Intel iHD low-delay HEVC)
         slice_param.slice_pic_parameter_set_id = 0;
         slice_param.max_num_merge_cand = 5;
+        if (mUsingCqp) {
+            slice_param.slice_qp_delta = static_cast<int8_t>(static_cast<int32_t>(mActiveQp) - 30);
+        }
         slice_param.slice_fields.bits.last_slice_of_pic_flag = 1;
         slice_param.slice_fields.bits.slice_temporal_mvp_enabled_flag = is_keyframe ? 0 : 1;
         slice_param.slice_fields.bits.slice_sao_luma_flag = 1;
@@ -1133,18 +1271,19 @@ bool VaapiWrapper::RenderSliceParameters(VASurfaceID surface, bool is_keyframe) 
             slice_param.num_ref_idx_l0_active_minus1 = 0;
             slice_param.num_ref_idx_l1_active_minus1 = 0;
             slice_param.ref_pic_list0[0].picture_id = mReconSurfaces[mPrevRecon];
-            slice_param.ref_pic_list0[0].pic_order_cnt = mFrameIndex - 1;
+            slice_param.ref_pic_list0[0].pic_order_cnt = poc - 1;
             slice_param.ref_pic_list0[0].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
             slice_param.ref_pic_list1[0].picture_id = mReconSurfaces[mPrevRecon];
-            slice_param.ref_pic_list1[0].pic_order_cnt = mFrameIndex - 1;
+            slice_param.ref_pic_list1[0].pic_order_cnt = poc - 1;
             slice_param.ref_pic_list1[0].flags = VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
         }
 
         VABufferID slice_buf_id = VA_INVALID_ID;
-        vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSliceParameterBufferType,
-                       sizeof(slice_param), 1, &slice_param, &slice_buf_id);
-        vaRenderPicture(mVaDisplay, mVaContextId, &slice_buf_id, 1);
-        vaDestroyBuffer(mVaDisplay, slice_buf_id);
+        if (vaCreateBuffer(mVaDisplay, mVaContextId, VAEncSliceParameterBufferType,
+                           sizeof(slice_param), 1, &slice_param, &slice_buf_id) != VA_STATUS_SUCCESS || slice_buf_id == VA_INVALID_ID) {
+            return false;
+        }
+        bufs[(*num_bufs)++] = slice_buf_id;
     }
     return true;
 }
@@ -1194,9 +1333,7 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
 
     bool is_keyframe = (mFrameIndex % mConfig.intra_period == 0) || force_keyframe || mForceKeyFrame;
     mForceKeyFrame = false;
-    if (is_keyframe) {
-        mFrameIndex = 0;
-    }
+    uint32_t poc = is_keyframe ? 0 : mFrameIndex;
 
     uint64_t t_submit = NowUs();
     VAStatus status = vaBeginPicture(mVaDisplay, mVaContextId, enc_surface);
@@ -1205,22 +1342,33 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
         return false;
     }
 
+    VABufferID frame_bufs[12];
+    int num_bufs = 0;
+
     if (is_keyframe) {
-        RenderSequenceParameters();
+        AppendSequenceBuffer(frame_bufs, &num_bufs);
     }
-    if (is_keyframe || mBitrateNeedsUpdate) {
-        SetupRateControl();
+    if (!mRateControlInitialized || mBitrateNeedsUpdate) {
+        bool reset_brc = mRateControlInitialized && mBitrateNeedsUpdate;
+        AppendRateControlBuffers(reset_brc, frame_bufs, &num_bufs);
         mBitrateNeedsUpdate = false;
     }
 
-    RenderPictureParameters(enc_surface, is_keyframe);
-    RenderPackedHeaders(is_keyframe);
-    RenderSliceParameters(enc_surface, is_keyframe);
+    AppendPictureBuffer(enc_surface, is_keyframe, poc, frame_bufs, &num_bufs);
+    AppendPackedHeaderBuffers(is_keyframe, poc, frame_bufs, &num_bufs);
+    AppendSliceBuffer(enc_surface, is_keyframe, poc, frame_bufs, &num_bufs);
 
+    VAStatus render_status = vaRenderPicture(mVaDisplay, mVaContextId, frame_bufs, num_bufs);
     status = vaEndPicture(mVaDisplay, mVaContextId);
+    for (int i = 0; i < num_bufs; ++i) {
+        if (frame_bufs[i] != VA_INVALID_ID) {
+            vaDestroyBuffer(mVaDisplay, frame_bufs[i]);
+        }
+    }
     mLastEncSubmitUs = NowUs() - t_submit;
-    if (status != VA_STATUS_SUCCESS) {
-        ALOGE("vaEndPicture failed: %s", vaErrorStr(status));
+    if (render_status != VA_STATUS_SUCCESS || status != VA_STATUS_SUCCESS) {
+        ALOGE("vaRenderPicture/vaEndPicture failed: render=%s end=%s",
+              vaErrorStr(render_status), vaErrorStr(status));
         return false;
     }
 
@@ -1259,8 +1407,8 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
 
     uint8_t *dst = reinterpret_cast<uint8_t *>(allocator(total_size));
     if (!dst) {
-        ALOGE("Output buffer allocator failed for %zu bytes", total_size);
         vaUnmapBuffer(mVaDisplay, mCodedBuf);
+        mForceKeyFrame = true;
         *out_actual_size = 0;
         return false;
     }
@@ -1273,8 +1421,10 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
 
     for (VACodedBufferSegment *curr = buf_segment; curr != nullptr;
          curr = reinterpret_cast<VACodedBufferSegment *>(curr->next)) {
-        memcpy(dst + copied, curr->buf, curr->size);
-        copied += curr->size;
+        if (curr->size > 0 && curr->buf) {
+            CopyFromCodedBuffer(dst + copied, curr->buf, curr->size);
+            copied += curr->size;
+        }
     }
 
     vaUnmapBuffer(mVaDisplay, mCodedBuf);
@@ -1287,7 +1437,27 @@ bool VaapiWrapper::EncodeFrame(VASurfaceID input_surface,
 
     mHasReference = true;
     std::swap(mCurrentRecon, mPrevRecon);
-    mFrameIndex++;
+    mFrameIndex = poc + 1;
+
+    if (mUsingCqp) {
+        mRcWindowBytes += copied;
+        mRcWindowFrames++;
+        if (mRcWindowFrames >= 30) {
+            uint32_t fps = (mConfig.frame_rate > 0) ? mConfig.frame_rate : 60;
+            uint64_t actual_bps = (static_cast<uint64_t>(mRcWindowBytes) * 8ULL * fps) / mRcWindowFrames;
+            uint64_t target_bps = (mConfig.bit_rate > 0) ? mConfig.bit_rate : 8000000ULL;
+            if (actual_bps > (target_bps * 135ULL) / 100ULL && mActiveQp < 36) {
+                mActiveQp = std::min<uint32_t>(36, mActiveQp + 2);
+            } else if (actual_bps > (target_bps * 115ULL) / 100ULL && mActiveQp < 36) {
+                mActiveQp += 1;
+            } else if (actual_bps < (target_bps * 70ULL) / 100ULL && mActiveQp > mBaseQp) {
+                mActiveQp -= 1;
+            }
+            mRcWindowBytes = 0;
+            mRcWindowFrames = 0;
+        }
+    }
+
     return true;
 }
 
@@ -1300,6 +1470,10 @@ bool VaapiWrapper::UpdateBitrate(uint32_t new_bitrate) {
     std::lock_guard<std::mutex> lock(mLock);
     mConfig.bit_rate = new_bitrate;
     mConfig.max_bit_rate = new_bitrate * 3 / 2;
+    mBaseQp = ComputeTargetQp(new_bitrate, mConfig.width, mConfig.height, mConfig.frame_rate);
+    mActiveQp = mBaseQp;
+    mRcWindowBytes = 0;
+    mRcWindowFrames = 0;
     mBitrateNeedsUpdate = true;
     return true;
 }
