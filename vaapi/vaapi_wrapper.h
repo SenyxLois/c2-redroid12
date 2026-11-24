@@ -84,14 +84,14 @@ private:
 
     bool InitDrmDevice();
     bool CreateEncoderContext();
-    bool SetupRateControl();
     bool InitVpp();
     VASurfaceID ConvertRgbToNv12(VASurfaceID rgb_surface);
 
-    bool RenderSequenceParameters();
-    bool RenderPictureParameters(VASurfaceID surface, bool is_keyframe);
-    bool RenderPackedHeaders(bool is_keyframe);
-    bool RenderSliceParameters(VASurfaceID surface, bool is_keyframe);
+    bool AppendRateControlBuffers(bool reset_brc, VABufferID *bufs, int *num_bufs);
+    bool AppendSequenceBuffer(VABufferID *bufs, int *num_bufs);
+    bool AppendPictureBuffer(VASurfaceID surface, bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs);
+    bool AppendPackedHeaderBuffers(bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs);
+    bool AppendSliceBuffer(VASurfaceID surface, bool is_keyframe, uint32_t poc, VABufferID *bufs, int *num_bufs);
     bool IsSurfaceRgb(VASurfaceID surface_id) const;
 
     struct SurfaceCacheEntry {
@@ -132,6 +132,7 @@ private:
 
     uint32_t mFrameIndex = 0;
     bool mForceKeyFrame = false;
+    bool mRateControlInitialized = false;
     bool mBitrateNeedsUpdate = false;
     bool mUsingCqp = false;
     uint32_t mActiveQp = 26;
