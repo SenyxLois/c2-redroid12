@@ -38,6 +38,8 @@ namespace media {
 namespace c2 {
 namespace redroid {
 
+extern std::atomic<uint64_t> gRedroidEncConfigSeq;
+
 class C2RedroidEnc : public SimpleC2Component {
 public:
     class IntfImpl;
@@ -71,6 +73,11 @@ private:
     uint32_t mBitrate = 10000000;
     uint32_t mFrameRate = 60;
     uint32_t mIntraPeriod = 60;
+    uint64_t mLastConfigSeq = 0;
+    int32_t mLastExtIdrSeq = 0;
+    uint32_t mCachedOpenFds = 0;
+    uint32_t mCachedDmabufFds = 0;
+    uint32_t mStatsFlushCounter = 0;
 
     std::shared_ptr<C2BlockPool> mFallbackPool;
     std::string mComponentName = "c2.redroid.enc";
