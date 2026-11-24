@@ -28,6 +28,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -36,6 +37,8 @@ namespace hardware {
 namespace media {
 namespace c2 {
 namespace redroid {
+
+std::atomic<uint64_t> gRedroidEncConfigSeq{1};
 
 namespace {
 
@@ -51,31 +54,47 @@ inline uint64_t NowWallMs() {
     return static_cast<uint64_t>(ts.tv_sec) * 1000ULL + static_cast<uint64_t>(ts.tv_nsec) / 1000000ULL;
 }
 
-void CountSelfFds(uint32_t *out_total_fds, uint32_t *out_dmabuf_fds) {
-    uint32_t total = 0;
-    uint32_t dmabuf = 0;
+void CountSelfFdsFast(uint32_t *io_total_fds, uint32_t *io_dmabuf_fds, bool force_rescan) {
     DIR *dir = opendir("/proc/self/fd");
-    if (dir) {
-        int dfd = dirfd(dir);
-        struct dirent *ent = nullptr;
-        char target[64];
+    if (!dir) {
+        return;
+    }
+    int dfd = dirfd(dir);
+    uint32_t total = 0;
+    struct dirent *ent = nullptr;
+    if (!force_rescan && *io_total_fds > 0) {
+        // Fast pass: count directory entries without ~100 readlinkat syscalls if unchanged
         while ((ent = readdir(dir)) != nullptr) {
-            if (ent->d_name[0] == '.') {
-                continue;
-            }
-            total++;
-            ssize_t len = readlinkat(dfd, ent->d_name, target, sizeof(target) - 1);
-            if (len >= 7) {
-                target[len] = '\0';
-                if (strncmp(target, "/dmabuf", 7) == 0 || strncmp(target, "dmabuf", 6) == 0) {
-                    dmabuf++;
-                }
+            if (ent->d_name[0] != '.') {
+                total++;
             }
         }
-        closedir(dir);
+        if (total == *io_total_fds) {
+            closedir(dir);
+            return;
+        }
+        rewinddir(dir);
+        total = 0;
     }
-    *out_total_fds = total;
-    *out_dmabuf_fds = dmabuf;
+
+    uint32_t dmabuf = 0;
+    char target[64];
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        total++;
+        ssize_t len = readlinkat(dfd, ent->d_name, target, sizeof(target) - 1);
+        if (len >= 6) {
+            target[len] = '\0';
+            if (strncmp(target, "/dmabuf", 7) == 0 || strncmp(target, "dmabuf", 6) == 0) {
+                dmabuf++;
+            }
+        }
+    }
+    closedir(dir);
+    *io_total_fds = total;
+    *io_dmabuf_fds = dmabuf;
 }
 
 } // anonymous namespace
@@ -118,11 +137,22 @@ bool C2RedroidEnc::initEncoder() {
         return true;
     }
 
-    // Query configured bitrate from component interface
+    // Query configured bitrate and sync interval once on init
     C2StreamBitrateInfo::output bitrate(0u);
-    if (mIntf && mIntf->query_vb({ &bitrate }, {}, C2_MAY_BLOCK, nullptr) == C2_OK && bitrate.value > 0) {
-        mBitrate = bitrate.value;
+    C2StreamSyncFrameIntervalTuning::output syncInterval(0u);
+    if (mIntf && mIntf->query_vb({ &bitrate, &syncInterval }, {}, C2_MAY_BLOCK, nullptr) == C2_OK) {
+        if (bitrate.value > 0) {
+            mBitrate = bitrate.value;
+        }
+        if (syncInterval.value > 0) {
+            uint32_t period = (uint32_t)((syncInterval.value * mFrameRate) / 1000000LL);
+            if (period > 0) {
+                mIntraPeriod = period;
+            }
+        }
     }
+    mLastConfigSeq = gRedroidEncConfigSeq.load(std::memory_order_acquire);
+    mLastExtIdrSeq = property_get_int32("sys.xynes.c2.force_idr", 0);
 
     VaapiEncoderConfig config{};
     config.codec = getCodecType();
@@ -228,8 +258,10 @@ void C2RedroidEnc::flushPerfWindow(uint64_t now_us, const VaapiFrameStats &vstat
     const char *ep_str = (vstats.entrypoint == static_cast<uint32_t>(VAEntrypointEncSliceLP)) ? "LP" : "Slice";
     const char *rc_str = vstats.using_cqp ? "CQP" : "CBR";
 
-    uint32_t open_fds = 0, dmabuf_fds = 0;
-    CountSelfFds(&open_fds, &dmabuf_fds);
+    bool force_fd_rescan = ((++mStatsFlushCounter % 5u) == 1u);
+    CountSelfFdsFast(&mCachedOpenFds, &mCachedDmabufFds, force_fd_rescan);
+    uint32_t open_fds = mCachedOpenFds;
+    uint32_t dmabuf_fds = mCachedDmabufFds;
 
     const char *comp_name = mComponentName.empty() ? "c2.redroid.enc" : mComponentName.c_str();
     __android_log_print(
@@ -311,11 +343,28 @@ void C2RedroidEnc::flushPerfWindow(uint64_t now_us, const VaapiFrameStats &vstat
 
     if (n > 0) {
         size_t len = static_cast<size_t>(std::min<int>(n, static_cast<int>(sizeof(json_buf) - 1)));
-        int fd = open("/data/local/tmp/c2_encoder_stats.json", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        char tmp_path[96];
+        snprintf(tmp_path, sizeof(tmp_path), "/data/local/tmp/.c2_stats_%d_%d.tmp", (int)getpid(), (int)gettid());
+        bool saved_atomic = false;
+        int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd >= 0) {
-            ssize_t ignored = write(fd, json_buf, len);
-            (void)ignored;
+            ssize_t written = write(fd, json_buf, len);
+            fchmod(fd, 0666);
             close(fd);
+            if (written == static_cast<ssize_t>(len) &&
+                rename(tmp_path, "/data/local/tmp/c2_encoder_stats.json") == 0) {
+                saved_atomic = true;
+            } else {
+                unlink(tmp_path);
+            }
+        }
+        if (!saved_atomic) {
+            int dfd = open("/data/local/tmp/c2_encoder_stats.json", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (dfd >= 0) {
+                ssize_t ignored = write(dfd, json_buf, len);
+                (void)ignored;
+                close(dfd);
+            }
         }
     }
 
@@ -353,9 +402,16 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
     }
     mLastFrameStartUs = t_frame_start;
 
-    // Batch query dynamic bitrate, sync interval, and immediate sync frame request in a single call
+    // Lock-free sequence check: only query C2InterfaceHelper when parameters actually changed
     bool force_keyframe = false;
-    if (mIntf) {
+    int32_t ext_idr_seq = property_get_int32("sys.xynes.c2.force_idr", 0);
+    if (ext_idr_seq != mLastExtIdrSeq) {
+        mLastExtIdrSeq = ext_idr_seq;
+        force_keyframe = true;
+    }
+    uint64_t cur_seq = gRedroidEncConfigSeq.load(std::memory_order_acquire);
+    if (mIntf && (cur_seq != mLastConfigSeq || !work->input.configUpdate.empty())) {
+        mLastConfigSeq = cur_seq;
         C2StreamBitrateInfo::output bitrate(0u);
         C2StreamSyncFrameIntervalTuning::output syncInterval(0u);
         C2StreamRequestSyncFrameTuning::output requestSync(0u);
@@ -378,6 +434,8 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
                 C2StreamRequestSyncFrameTuning::output clearSync(0u, C2_FALSE);
                 std::vector<std::unique_ptr<C2SettingResult>> failures;
                 mIntf->config_vb({ &clearSync }, C2_MAY_BLOCK, &failures);
+                mLastConfigSeq = gRedroidEncConfigSeq.load(std::memory_order_acquire);
+    mLastExtIdrSeq = property_get_int32("sys.xynes.c2.force_idr", 0);
             }
         }
     }
@@ -458,7 +516,7 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
                 alloc_size,
                 { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE },
                 &outBlock);
-            if (alloc_status != C2_OK || !outBlock) {
+            if ((alloc_status != C2_OK || !outBlock) && alloc_status != C2_TIMED_OUT) {
                 if (!mFallbackPool) {
                     auto store = GetCodec2PlatformAllocatorStore();
                     std::shared_ptr<C2Allocator> alloc;
@@ -474,7 +532,11 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
                 }
             }
             if (alloc_status != C2_OK || !outBlock) {
-                ALOGE("Failed to fetch output C2LinearBlock (%zu bytes): %d", alloc_size, alloc_status);
+                if (alloc_status == C2_TIMED_OUT) {
+                    ALOGW("[%s] Output block pool saturated (downstream stalled); dropping frame cleanly", getComponentName());
+                } else {
+                    ALOGE("Failed to fetch output C2LinearBlock (%zu bytes): %d", alloc_size, alloc_status);
+                }
                 return nullptr;
             }
             writeView = std::make_unique<C2WriteView>(outBlock->map().get());
@@ -491,6 +553,16 @@ void C2RedroidEnc::process(const std::unique_ptr<C2Work> &work,
 
     // Release transient surface if uncached; cached BufferQueue surfaces stay alive in mVaapi
     mVaapi->DestroySurface(input_surface);
+
+    if (alloc_status == C2_TIMED_OUT) {
+        // Downstream consumer stalled: drop this frame cleanly without raising MediaCodec error
+        mVaapi->RequestKeyFrame();
+        work->worklets.front()->output.flags = C2FrameData::FLAG_DROP_FRAME;
+        work->worklets.front()->output.buffers.clear();
+        work->worklets.front()->output.ordinal = work->input.ordinal;
+        work->result = C2_OK;
+        return;
+    }
 
     if (!ok || actual_out_size == 0 || !outBlock) {
         ALOGE("Hardware frame encoding failed in VA-API");
