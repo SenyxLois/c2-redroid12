@@ -99,18 +99,21 @@ public:
     static C2R BitrateSetter(bool mayBlock, C2P<C2StreamBitrateInfo::output> &me) {
         (void)mayBlock;
         (void)me;
+        gRedroidEncConfigSeq.fetch_add(1, std::memory_order_release);
         return C2R::Ok();
     }
 
     static C2R RequestSyncSetter(bool mayBlock, C2P<C2StreamRequestSyncFrameTuning::output> &me) {
         (void)mayBlock;
         (void)me;
+        gRedroidEncConfigSeq.fetch_add(1, std::memory_order_release);
         return C2R::Ok();
     }
 
     static C2R SyncFramePeriodSetter(bool mayBlock, C2P<C2StreamSyncFrameIntervalTuning::output> &me) {
         (void)mayBlock;
         (void)me;
+        gRedroidEncConfigSeq.fetch_add(1, std::memory_order_release);
         return C2R::Ok();
     }
 
